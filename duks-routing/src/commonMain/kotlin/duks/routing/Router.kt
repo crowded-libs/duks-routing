@@ -1,10 +1,8 @@
 package duks.routing
 
 import androidx.compose.runtime.Composable
-import duks.KStore
-import duks.StateModel
-import duks.StoreBuilder
-
+import duks.*
+import duks.logging.*
 
 // Store extension methods
 fun <TState: StateModel> KStore<TState>.routeTo(
@@ -35,11 +33,13 @@ fun <TState: StateModel> KStore<TState>.popToRoute(path: String) {
 
 // DSL for building routes
 class RouterBuilder {
+    private val logger = Logger.default()
     private val routes = mutableListOf<Route<*>>()
     private var initialRoutePath: String? = null
     
     // Set the initial route for the application
     fun initialRoute(path: String) {
+        logger.debug(path) { "Setting initial route: {path}" }
         initialRoutePath = path
     }
     
@@ -158,6 +158,8 @@ class RouterBuilder {
         whenCondition: RenderCondition? = null,
         content: @Composable () -> Unit
     ): Route<T> {
+        logger.debug(path, layer, if (requiresAuth) " (requires auth)" else "") { "Registering route: {path} on layer {layer}{authStatus}" }
+        
         val conditions = listOfNotNull(whenCondition)
         val route = Route(
             path = path,
@@ -179,6 +181,8 @@ class RouterBuilder {
         whenCondition: RenderCondition? = null,
         block: RouteGroupBuilder<T>.() -> Unit
     ) {
+        logger.debug(pathPrefix) { if (pathPrefix != null) "Creating route group with prefix: {prefix}" else "Creating route group" }
+        
         val builder = RouteGroupBuilder<T>(
             this,
             pathPrefix,
@@ -343,6 +347,7 @@ class RouteGroupBuilder<T>(
 fun <TState: StateModel> StoreBuilder<TState>.routing(
     authConfig: AuthConfig<TState> = AuthConfig({ true }),
     fallbackRoute: String = "/404",
+    routingStateSelector: ((TState) -> RouterState?)? = null,
     routes: RouterBuilder.() -> Unit
 ): RouterMiddleware<TState> {
     val builder = RouterBuilder()
@@ -354,7 +359,8 @@ fun <TState: StateModel> StoreBuilder<TState>.routing(
         authConfig = authConfig,
         routes = routeList,
         fallbackRoute = fallbackRoute,
-        initialRoute = initialRoute
+        initialRoute = initialRoute,
+        routingStateSelector = routingStateSelector
     )
     
     middleware {

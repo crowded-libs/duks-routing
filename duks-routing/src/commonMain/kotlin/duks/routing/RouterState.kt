@@ -2,6 +2,11 @@ package duks.routing
 
 import duks.StateModel
 
+// Interface for states that provide router state for persistence/restoration
+interface RoutingStateProvider {
+    val routingState: RouterState
+}
+
 // Router state with layer management
 data class RouterState(
     val sceneRoutes: List<RouteInstance> = emptyList(),

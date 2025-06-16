@@ -1,9 +1,8 @@
 package duks.routing
 
 import androidx.compose.runtime.Composable
-import duks.Action
-import duks.StateModel
-import duks.createStore
+import duks.*
+import duks.logging.*
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
@@ -14,6 +13,8 @@ import kotlin.test.assertNotNull
 import kotlin.time.Duration.Companion.seconds
 
 class RouterTest {
+    private val logger = Logger.default()
+    
     // Test app state
     data class TestAppState(
         val isAuthenticated: Boolean = false,
@@ -430,10 +431,10 @@ class RouterTest {
             state.sceneRoutes.any { it.route.path == "/scene-inherit" }
         }
         
-        // Debug: print all scene routes
-        println("Scene routes after navigating to /scene-inherit:")
+        // Debug: log all scene routes
+        logger.debug { "Scene routes after navigating to /scene-inherit:" }
         routerMiddleware.state.value.sceneRoutes.forEach { route ->
-            println("  Path: ${route.route.path}, Config: ${route.route.config}")
+            logger.debug(route.route.path, route.route.config) { "  Path: {path}, Config: {config}" }
         }
         
         val sceneInheritRoute = routerMiddleware.state.value.sceneRoutes.firstOrNull { it.route.path == "/scene-inherit" }
@@ -1272,11 +1273,11 @@ private fun TestTagsModal() {}
         
         // Check initial state
         val initialState = routerMiddleware.state.value
-        println("Initial state debug:")
-        println("  sceneRoutes.size: ${initialState.sceneRoutes.size}")
-        println("  contentRoutes.size: ${initialState.contentRoutes.size}")
+        logger.debug { "Initial state debug:" }
+        logger.debug(initialState.sceneRoutes.size) { "  sceneRoutes.size: {size}" }
+        logger.debug(initialState.contentRoutes.size) { "  contentRoutes.size: {size}" }
         if (initialState.contentRoutes.isNotEmpty()) {
-            println("  Initial content route: ${initialState.contentRoutes.first().route.path}")
+            logger.debug(initialState.contentRoutes.first().route.path) { "  Initial content route: {path}" }
         }
         assertEquals(0, initialState.sceneRoutes.size, "Expected initial sceneRoutes to be empty, but was ${initialState.sceneRoutes.size}")
         assertEquals(1, initialState.contentRoutes.size, "Expected initial contentRoutes to have root route")
@@ -1311,20 +1312,20 @@ private fun TestTagsModal() {}
         assertEquals("/main", routerMiddleware.state.value.sceneRoutes.last().route.path)
         
         // Test going back through scene routes
-        println("Before first goBack:")
-        println("  sceneRoutes.size: ${routerMiddleware.state.value.sceneRoutes.size}")
-        println("  contentRoutes.size: ${routerMiddleware.state.value.contentRoutes.size}")
-        println("  modalRoutes.size: ${routerMiddleware.state.value.modalRoutes.size}")
+        logger.debug { "Before first goBack:" }
+        logger.debug(routerMiddleware.state.value.sceneRoutes.size) { "  sceneRoutes.size: {size}" }
+        logger.debug(routerMiddleware.state.value.contentRoutes.size) { "  contentRoutes.size: {size}" }
+        logger.debug(routerMiddleware.state.value.modalRoutes.size) { "  modalRoutes.size: {size}" }
         
         store.goBack()
         
         // Wait for the state to actually change to 3 scene routes
         routerMiddleware.state.first { it.sceneRoutes.size == 3 }
         
-        println("After first goBack:")
-        println("  sceneRoutes.size: ${routerMiddleware.state.value.sceneRoutes.size}")
-        println("  contentRoutes.size: ${routerMiddleware.state.value.contentRoutes.size}")
-        println("  modalRoutes.size: ${routerMiddleware.state.value.modalRoutes.size}")
+        logger.debug { "After first goBack:" }
+        logger.debug(routerMiddleware.state.value.sceneRoutes.size) { "  sceneRoutes.size: {size}" }
+        logger.debug(routerMiddleware.state.value.contentRoutes.size) { "  contentRoutes.size: {size}" }
+        logger.debug(routerMiddleware.state.value.modalRoutes.size) { "  modalRoutes.size: {size}" }
         
         assertEquals(3, routerMiddleware.state.value.sceneRoutes.size)
         assertEquals("/onboarding", routerMiddleware.state.value.sceneRoutes.last().route.path)
@@ -1334,8 +1335,8 @@ private fun TestTagsModal() {}
         // Wait for the state to actually change to 2 scene routes
         routerMiddleware.state.first { it.sceneRoutes.size == 2 }
         
-        println("After second goBack:")
-        println("  sceneRoutes.size: ${routerMiddleware.state.value.sceneRoutes.size}")
+        logger.debug { "After second goBack:" }
+        logger.debug(routerMiddleware.state.value.sceneRoutes.size) { "  sceneRoutes.size: {size}" }
         
         assertEquals(2, routerMiddleware.state.value.sceneRoutes.size)
         assertEquals("/login", routerMiddleware.state.value.sceneRoutes.last().route.path)
@@ -1344,8 +1345,8 @@ private fun TestTagsModal() {}
         
         routerMiddleware.state.first { it.sceneRoutes.size == 1 }
         
-        println("After third goBack:")
-        println("  sceneRoutes.size: ${routerMiddleware.state.value.sceneRoutes.size}")
+        logger.debug { "After third goBack:" }
+        logger.debug(routerMiddleware.state.value.sceneRoutes.size) { "  sceneRoutes.size: {size}" }
         
         assertEquals(1, routerMiddleware.state.value.sceneRoutes.size)
         assertEquals("/splash", routerMiddleware.state.value.sceneRoutes.last().route.path)
