@@ -32,10 +32,11 @@ fun <TState: StateModel> KStore<TState>.popToRoute(path: String) {
 }
 
 // DSL for building routes
-class RouterBuilder {
+class RouterBuilder<TState: StateModel> {
     private val logger = Logger.default()
     private val routes = mutableListOf<Route<*>>()
     private var initialRoutePath: String? = null
+    private var restorationStrategy: RestorationStrategy = RestorationStrategy.RestoreAll
     
     // Set the initial route for the application
     fun initialRoute(path: String) {
@@ -179,11 +180,11 @@ class RouterBuilder {
         requiresAuth: Boolean = false,
         config: T? = null,
         whenCondition: RenderCondition? = null,
-        block: RouteGroupBuilder<T>.() -> Unit
+        block: RouteGroupBuilder<T, TState>.() -> Unit
     ) {
         logger.debug(pathPrefix) { if (pathPrefix != null) "Creating route group with prefix: {prefix}" else "Creating route group" }
         
-        val builder = RouteGroupBuilder<T>(
+        val builder = RouteGroupBuilder<T, TState>(
             this,
             pathPrefix,
             requiresAuth,
@@ -193,14 +194,26 @@ class RouterBuilder {
         builder.apply(block)
     }
     
+    /**
+     * Configure restoration strategy for the router.
+     */
+    fun restoration(block: RestorationBuilder<TState>.() -> Unit) {
+        val builder = RestorationBuilder<TState>()
+        builder.block()
+        restorationStrategy = builder.build()
+        logger.debug { "Configured restoration strategy: $restorationStrategy" }
+    }
+    
     fun build(): List<Route<*>> = routes.toList()
     
     fun getInitialRoute(): String? = initialRoutePath
+    
+    fun getRestorationStrategy(): RestorationStrategy = restorationStrategy
 }
 
 // Route group builder
-class RouteGroupBuilder<T>(
-    val routerBuilder: RouterBuilder,
+class RouteGroupBuilder<T, TState: StateModel>(
+    val routerBuilder: RouterBuilder<TState>,
     val pathPrefix: String?,
     val groupRequiresAuth: Boolean,
     val groupConfig: T?,
@@ -347,20 +360,20 @@ class RouteGroupBuilder<T>(
 fun <TState: StateModel> StoreBuilder<TState>.routing(
     authConfig: AuthConfig<TState> = AuthConfig({ true }),
     fallbackRoute: String = "/404",
-    routingStateSelector: ((TState) -> RouterState?)? = null,
-    routes: RouterBuilder.() -> Unit
+    routes: RouterBuilder<TState>.() -> Unit
 ): RouterMiddleware<TState> {
-    val builder = RouterBuilder()
+    val builder = RouterBuilder<TState>()
     builder.apply(routes)
     val routeList = builder.build()
     val initialRoute = builder.getInitialRoute()
+    val restorationStrategy = builder.getRestorationStrategy()
     
     val routerMiddleware = RouterMiddleware<TState>(
         authConfig = authConfig,
         routes = routeList,
         fallbackRoute = fallbackRoute,
         initialRoute = initialRoute,
-        routingStateSelector = routingStateSelector
+        restorationStrategy = restorationStrategy
     )
     
     middleware {

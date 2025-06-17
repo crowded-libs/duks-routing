@@ -3,22 +3,38 @@ package duks.routing
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.compositionLocalOf
+import kotlinx.serialization.Serializable
 
 // Composition local for accessing route param
 val LocalRouteParam = compositionLocalOf<Any?> { null }
 
-// Base interface for all route instances
 interface RouteInstance {
-    val route: Route<*>
+    val path: String
+    val param: Any?
     
     @Composable
     fun Content()
 }
 
-// Route instance for routes without parameters
-data class SimpleRouteInstance(
-    override val route: Route<*>
+// Serializable route instance - only serializes the path, parameters are not supported
+@Serializable
+data class SerializableRouteInstance(
+    override val path: String
 ) : RouteInstance {
+    override val param: Any?
+        get() = null
+    
+    @Composable
+    override fun Content() {
+        error("SerializableRouteInstance.Content() should not be called directly")
+    }
+}
+
+data class SimpleRouteInstance(
+    val route: Route<*>
+) : RouteInstance {
+    override val path: String = route.path
+    override val param: Any? = null
     
     @Composable
     override fun Content() {
@@ -26,11 +42,11 @@ data class SimpleRouteInstance(
     }
 }
 
-// Route instance for routes with parameters
 data class ParameterizedRouteInstance<T>(
-    override val route: Route<*>,
-    val param: T
+    val route: Route<*>,
+    override val param: T
 ) : RouteInstance {
+    override val path: String = route.path
     
     @Composable
     override fun Content() {
@@ -49,10 +65,22 @@ fun createRouteInstance(route: Route<*>, param: Any? = null): RouteInstance {
     }
 }
 
-// Extension property to safely get param from RouteInstance
-val RouteInstance.param: Any?
+// Factory function to create serializable route instance (parameters not supported)
+fun createSerializableRouteInstance(path: String, param: Any? = null): SerializableRouteInstance {
+    // Note: param is ignored - parameters are not serialized
+    return SerializableRouteInstance(path)
+}
+
+// Convert a RouteInstance to its serializable form (parameters not preserved)
+fun RouteInstance.toSerializable(): SerializableRouteInstance {
+    // Note: parameters are not serialized - this is a current limitation
+    return SerializableRouteInstance(path)
+}
+
+// Extension property to get route from RouteInstance (if available)
+val RouteInstance.route: Route<*>?
     get() = when (this) {
-        is ParameterizedRouteInstance<*> -> param
-        is SimpleRouteInstance -> null
-        else -> null // For future implementations
+        is SimpleRouteInstance -> route
+        is ParameterizedRouteInstance<*> -> route
+        else -> null
     }

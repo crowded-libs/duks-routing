@@ -1,7 +1,10 @@
 package duks.routing
 
 import duks.*
-import duks.logging.*
+import duks.logging.Logger
+import duks.logging.debug
+import duks.logging.info
+import duks.logging.warn
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -12,33 +15,19 @@ class RouterMiddleware<TState: StateModel>(
     private val routes: List<Route<*>>,
     private val fallbackRoute: String = "/404",
     private val initialRoute: String? = null,
-    private val routingStateSelector: ((TState) -> RouterState?)? = null
+    private val restorationStrategy: RestorationStrategy = RestorationStrategy.RestoreAll
 ) : Middleware<TState>, StoreLifecycleAware<TState> {
     private val logger = Logger.default()
     
-    // Private internal state
-    private val routerState = MutableStateFlow(RouterState())
+    // Private mutable state
+    private val internalState = MutableStateFlow(RouterState())
+    private var hasInitialized = false
 
     // Public read-only access to router state
-    val state: StateFlow<RouterState> = routerState.asStateFlow()
+    val state: StateFlow<RouterState> = internalState.asStateFlow()
     
     override suspend fun onStoreCreated(store: KStore<TState>) {
-        // Initialize with the configured initial route
-        val initialRoute = findInitialRoute()
-        logger.debug(initialRoute?.path ?: "none") { "Router initialized with initial route: {routePath}" }
-        
-        val initialState = if (initialRoute != null) {
-            val instance = createRouteInstance(initialRoute)
-            when (initialRoute.layer) {
-                NavigationLayer.Scene -> RouterState(sceneRoutes = listOf(instance), lastRouteType = RouteType.Scene)
-                NavigationLayer.Content -> RouterState(contentRoutes = listOf(instance), lastRouteType = RouteType.Content)
-                NavigationLayer.Modal -> RouterState(modalRoutes = listOf(instance), lastRouteType = RouteType.Modal)
-            }
-        } else {
-            RouterState()
-        }
-        routerState.value = initialState
-        store.dispatch(Routing.StateChanged(initialState))
+        // Don't initialize routes immediately - wait to see if restoration happens
     }
 
     override suspend fun invoke(store: KStore<TState>, next: suspend (Action) -> Action, action: Action): Action {
@@ -48,14 +37,21 @@ class RouterMiddleware<TState: StateModel>(
                     // StateChanged actions are just passed through - don't process them again
                     next(action)
                 } else {
-                    val currentState = routerState.value
+                    // Ensure initialization on first routing action if not restored
+                    if (!hasInitialized && internalState.value.getActiveRoutes().isEmpty()) {
+                        logger.debug { "First routing action received, applying initial route" }
+                        applyInitialRoute(store)
+                        hasInitialized = true
+                    }
+                    
+                    val currentState = internalState.value
                     val newState = processRoutingAction(store, action, currentState)
 
                     if (newState != currentState) {
                         logger.debug(action::class.simpleName) { "Router state changing due to action: {actionType}" }
                         
-                        // Update internal state first
-                        routerState.value = newState
+                        // Update state
+                        internalState.value = newState
 
                         // Pass the original action through
                         val result = next(action)
@@ -72,7 +68,7 @@ class RouterMiddleware<TState: StateModel>(
             }
             is DeviceAction -> {
                 // Update device context in router state
-                val currentState = routerState.value
+                val currentState = internalState.value
                 val newState = when (action) {
                     is DeviceAction.UpdateDeviceContext -> {
                         logger.debug(action.context.deviceType, action.context.screenWidth, action.context.screenHeight) { "Updating device context: {deviceType}, {screenWidth}x{screenHeight}" }
@@ -108,7 +104,7 @@ class RouterMiddleware<TState: StateModel>(
                         }
                     }
                 }
-                routerState.value = newState
+                internalState.value = newState
                 next(action)
             }
             is RestoreStateAction<*> -> {
@@ -116,33 +112,66 @@ class RouterMiddleware<TState: StateModel>(
                 val restoreAction = action as RestoreStateAction<TState>
                 val restoredState = restoreAction.state
                 
-                val restoredRouterState = when {
-                    restoredState is RoutingStateProvider -> {
-                        logger.debug { "Restoring router state from RoutingStateProvider" }
-                        restoredState.routingState
-                    }
-                    routingStateSelector != null -> {
-                        logger.debug { "Restoring router state using custom selector" }
-                        routingStateSelector(restoredState)
+                // Extract router state if the state implements HasRouterState
+                val routerState = when (restoredState) {
+                    is HasRouterState -> {
+                        logger.debug { "Found routerState in restored state" }
+                        restoredState.routerState
                     }
                     else -> {
-                        logger.error { "State restoration failed: State must implement RoutingStateProvider or provide routingStateSelector" }
-                        throw IllegalStateException(
-                            "State restoration requires either implementing RoutingStateProvider " +
-                            "or providing a routingStateSelector function"
-                        )
+                        logger.debug { "State does not implement HasRouterState interface" }
+                        null
                     }
                 }
                 
-                if (restoredRouterState != null) {
-                    logger.info(
-                        restoredRouterState.contentRoutes.size,
-                        restoredRouterState.modalRoutes.size,
-                        restoredRouterState.sceneRoutes.size
-                    ) { "Router state restored with {contentCount} content routes, {modalCount} modals, {sceneCount} scenes" }
-                    routerState.value = restoredRouterState
+                // Restore router state using the restoration logic
+                val restoredInternalState = if (routerState != null) {
+                    restoreFromRouterState(
+                        routerState = routerState,
+                        availableRoutes = routes,
+                        strategy = restorationStrategy,
+                        currentState = restoredState
+                    )
                 } else {
-                    logger.warn { "No router state found during restoration" }
+                    // No router state - check if we should apply initial route
+                    null
+                }
+                
+                if (restoredInternalState != null) {
+                    // Log restoration details
+                    val restoredPaths = buildString {
+                        if (restoredInternalState.sceneRoutes.isNotEmpty()) {
+                            append("scenes: ${restoredInternalState.sceneRoutes.map { it.path }}")
+                        }
+                        if (restoredInternalState.contentRoutes.isNotEmpty()) {
+                            if (this.isNotEmpty()) append(", ")
+                            append("content: ${restoredInternalState.contentRoutes.map { it.path }}")
+                        }
+                        if (restoredInternalState.modalRoutes.isNotEmpty()) {
+                            if (this.isNotEmpty()) append(", ")
+                            append("modals: ${restoredInternalState.modalRoutes.map { it.path }}")
+                        }
+                    }
+                    
+                    logger.info(
+                        restoredInternalState.contentRoutes.size,
+                        restoredInternalState.modalRoutes.size,
+                        restoredInternalState.sceneRoutes.size
+                    ) { "Router state restored with {contentCount} content routes, {modalCount} modals, {sceneCount} scenes" }
+                    
+                    if (restoredPaths.isNotEmpty()) {
+                        logger.debug(restoredPaths) { "Restored routes: {routes}" }
+                    }
+                    
+                    internalState.value = restoredInternalState
+                    hasInitialized = true
+                    
+                    // Dispatch state change notification
+                    store.dispatch(Routing.StateChanged(restoredInternalState))
+                } else {
+                    // No router state restored - apply initial route if configured
+                    applyInitialRoute(store)
+                    hasInitialized = true
                 }
                 
                 next(action)
@@ -162,6 +191,26 @@ class RouterMiddleware<TState: StateModel>(
         // Only use "/" as default initial route, don't auto-select other routes
         return routes.find { it.path == "/" && it.layer == NavigationLayer.Content }
             ?: routes.find { it.path == "/" }
+    }
+    
+    private fun applyInitialRoute(store: KStore<TState>) {
+        val initialRoute = findInitialRoute()
+        if (initialRoute != null) {
+            logger.debug(initialRoute.path) { "Applying initial route: {path}" }
+            
+            val instance = createRouteInstance(initialRoute)
+            val initialInternalState = when (initialRoute.layer) {
+                NavigationLayer.Scene -> RouterState(sceneRoutes = listOf(instance), lastRouteType = RouteType.Scene)
+                NavigationLayer.Content -> RouterState(contentRoutes = listOf(instance), lastRouteType = RouteType.Content)
+                NavigationLayer.Modal -> RouterState(modalRoutes = listOf(instance), lastRouteType = RouteType.Modal)
+            }
+            
+            internalState.value = initialInternalState
+            
+            store.dispatch(Routing.StateChanged(initialInternalState))
+        } else {
+            logger.debug { "No initial route configured" }
+        }
     }
 
     private fun processRoutingAction(store: KStore<TState>, action: Routing, state: RouterState): RouterState {
@@ -238,14 +287,14 @@ class RouterMiddleware<TState: StateModel>(
                 )
             }
             state.contentRoutes.size > 1 -> {
-                logger.debug(state.contentRoutes.last().route.path, state.contentRoutes[state.contentRoutes.size - 2].route.path) { "Going back: from {fromPath} to {toPath}" }
+                logger.debug(state.contentRoutes.last().path, state.contentRoutes[state.contentRoutes.size - 2].path) { "Going back: from {fromPath} to {toPath}" }
                 state.copy(
                     contentRoutes = state.contentRoutes.dropLast(1),
                     lastRouteType = RouteType.Back
                 )
             }
             state.sceneRoutes.size > 1 -> {
-                logger.debug(state.sceneRoutes.last().route.path, state.sceneRoutes[state.sceneRoutes.size - 2].route.path) { "Going back: from scene {fromPath} to {toPath}" }
+                logger.debug(state.sceneRoutes.last().path, state.sceneRoutes[state.sceneRoutes.size - 2].path) { "Going back: from scene {fromPath} to {toPath}" }
                 state.copy(
                     sceneRoutes = state.sceneRoutes.dropLast(1),
                     lastRouteType = RouteType.Back
@@ -260,7 +309,7 @@ class RouterMiddleware<TState: StateModel>(
 
     private fun handlePopToPath(action: Routing.PopToPath, state: RouterState): RouterState {
         val path = normalizePath(action.path)
-        val contentIndex = state.contentRoutes.indexOfLast { it.route.path == path }
+        val contentIndex = state.contentRoutes.indexOfLast { it.path == path }
 
         return if (contentIndex >= 0) {
             state.copy(
@@ -302,7 +351,7 @@ class RouterMiddleware<TState: StateModel>(
         return if (action.path != null) {
             val path = normalizePath(action.path)
             state.copy(
-                modalRoutes = state.modalRoutes.filter { it.route.path != path },
+                modalRoutes = state.modalRoutes.filter { it.path != path },
                 lastRouteType = RouteType.Back
             )
         } else {
@@ -389,6 +438,112 @@ class RouterMiddleware<TState: StateModel>(
             width < 600 -> DeviceClass.Phone
             width < 1024 -> DeviceClass.Tablet
             else -> DeviceClass.Desktop
+        }
+    }
+    
+    private fun <TState: StateModel> restoreFromRouterState(
+        routerState: RouterState,
+        availableRoutes: List<Route<*>>,
+        strategy: RestorationStrategy,
+        currentState: TState? = null
+    ): RouterState? {
+        // Use the RouterRestoration logic to handle restoration strategy
+        val filteredRouterState = RouterRestoration.applyRestorationStrategy(
+            routerState = routerState,
+            strategy = strategy,
+            currentState = currentState
+        )
+        
+        // If no routes after filtering and we have conditional defaults, apply them
+        if (!hasRoutes(filteredRouterState) && strategy is RestorationStrategy.RestoreWithDefaults<*>) {
+            @Suppress("UNCHECKED_CAST")
+            val defaults = strategy.conditionalDefaults as ConditionalDefaultsConfig<TState>
+            if (currentState != null) {
+                return applyConditionalDefaults(defaults, currentState, availableRoutes)
+            }
+        }
+        
+        // Convert serializable routes back to actual RouteInstances
+        val routeMap = availableRoutes.associateBy { it.path }
+        
+        val sceneRoutes = filteredRouterState.sceneRoutes.mapNotNull { serializableRoute ->
+            routeMap[serializableRoute.path]?.let { route ->
+                createRouteInstance(route, serializableRoute.param)
+            }
+        }
+        
+        val contentRoutes = filteredRouterState.contentRoutes.mapNotNull { serializableRoute ->
+            routeMap[serializableRoute.path]?.let { route ->
+                createRouteInstance(route, serializableRoute.param)
+            }
+        }
+        
+        val modalRoutes = filteredRouterState.modalRoutes.mapNotNull { serializableRoute ->
+            routeMap[serializableRoute.path]?.let { route ->
+                createRouteInstance(route, serializableRoute.param)
+            }
+        }
+        
+        return RouterState(
+            sceneRoutes = sceneRoutes,
+            contentRoutes = contentRoutes,
+            modalRoutes = modalRoutes,
+            deviceContext = filteredRouterState.deviceContext,
+            lastRouteType = filteredRouterState.lastRouteType
+        )
+    }
+    
+    private fun hasRoutes(routerState: RouterState): Boolean {
+        return routerState.sceneRoutes.isNotEmpty() || 
+               routerState.contentRoutes.isNotEmpty() || 
+               routerState.modalRoutes.isNotEmpty()
+    }
+    
+    private fun <TState: StateModel> applyConditionalDefaults(
+        config: ConditionalDefaultsConfig<TState>,
+        currentState: TState,
+        routes: List<Route<*>>
+    ): RouterState? {
+        // Find the first matching condition
+        val matchingDefault = config.defaults.firstOrNull { default ->
+            try {
+                default.condition(currentState)
+            } catch (e: Exception) {
+                logger.error("Error evaluating conditional default: ${e.message ?: "Unknown error"}")
+                false
+            }
+        }
+        
+        val routePath = matchingDefault?.route ?: config.fallbackRoute
+        if (routePath == null) {
+            logger.debug("No matching conditional defaults or fallback, returning empty state")
+            return null
+        }
+        
+        logger.debug("Applying conditional default route: $routePath")
+        
+        // Find the route in available routes
+        val route = routes.find { it.path == routePath }
+        if (route == null) {
+            logger.warn("Conditional default route not found: $routePath")
+            return null
+        }
+        
+        // Create route instance based on layer
+        val routeInstance = createRouteInstance(route)
+        return when (route.layer) {
+            NavigationLayer.Scene -> RouterState(
+                sceneRoutes = listOf(routeInstance),
+                lastRouteType = RouteType.Scene
+            )
+            NavigationLayer.Content -> RouterState(
+                contentRoutes = listOf(routeInstance),
+                lastRouteType = RouteType.Content
+            )
+            NavigationLayer.Modal -> RouterState(
+                modalRoutes = listOf(routeInstance),
+                lastRouteType = RouteType.Modal
+            )
         }
     }
 }
