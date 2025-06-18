@@ -260,6 +260,147 @@ class RouterRestorationTest {
     }
     
     @Test
+    fun `conditional defaults should override restored routes when conditions match`() = runTest {
+        // Create a store with conditional defaults
+        lateinit var routerMiddleware: RouterMiddleware<TestAppState>
+        
+        val store = createStore(TestAppState()) {
+            reduceWith { state, action -> testAppReducer(state, action) }
+            
+            // Use the test coroutine scope
+            scope(backgroundScope)
+            
+            routerMiddleware = routing(
+                authConfig = AuthConfig<TestAppState>(
+                    authChecker = { it.isLoggedIn },
+                    unauthenticatedRoute = "/login"
+                )
+            ) {
+                restoration {
+                    conditionalDefaults {
+                        `when` { !it.isLoggedIn } then "/login"
+                        otherwise("/home")
+                    }
+                }
+                
+                content("/dashboard") { }
+                content("/profile") { }
+                content("/login") { }
+                content("/home") { }
+            }
+        }
+        
+        // Create a state with existing routes but user is not authenticated
+        val stateWithRoutes = TestAppState(
+            userName = "",
+            isLoggedIn = false,
+            routerState = RouterState(
+                contentRoutes = listOf(
+                    createSerializableRouteInstance("/dashboard"),
+                    createSerializableRouteInstance("/profile")
+                )
+            )
+        )
+        
+        store.dispatch(RestoreStateAction(stateWithRoutes))
+        
+        // Wait for router state to update
+        routerMiddleware.state.first { it.contentRoutes.isNotEmpty() }
+        
+        // Should navigate to /login due to conditional default overriding the restored routes
+        assertEquals(1, routerMiddleware.state.value.contentRoutes.size)
+        assertEquals("/login", routerMiddleware.state.value.contentRoutes.firstOrNull()?.path)
+    }
+    
+    @Test
+    fun `initial route should be applied when no state is restored`() = runTest {
+        // Create a store with an initial route
+        lateinit var routerMiddleware: RouterMiddleware<TestAppState>
+        
+        val store = createStore(TestAppState()) {
+            reduceWith { state, action -> testAppReducer(state, action) }
+            
+            // Use the test coroutine scope
+            scope(backgroundScope)
+            
+            routerMiddleware = routing {
+                initialRoute("/landing")
+                
+                scene("/landing") { }
+                scene("/home") { }
+                scene("/login") { }
+            }
+        }
+        
+        // Don't dispatch any RestoreStateAction - router should initialize with initial route
+        
+        // Wait a bit for initialization
+        routerMiddleware.state.first { it.sceneRoutes.isNotEmpty() }
+        
+        // Should have the initial route
+        assertEquals(1, routerMiddleware.state.value.sceneRoutes.size)
+        assertEquals("/landing", routerMiddleware.state.value.sceneRoutes.firstOrNull()?.path)
+    }
+    
+    @Test
+    fun `router should defer initialization when storage restoration is in progress`() = runTest {
+        // Create a store that simulates storage restoration lifecycle
+        lateinit var routerMiddleware: RouterMiddleware<TestAppState>
+        
+        val store = createStore(TestAppState()) {
+            reduceWith { state, action -> testAppReducer(state, action) }
+            
+            // Use the test coroutine scope
+            scope(backgroundScope)
+            
+            routerMiddleware = routing(
+                authConfig = AuthConfig<TestAppState>(
+                    authChecker = { it.isLoggedIn },
+                    unauthenticatedRoute = "/login"
+                )
+            ) {
+                initialRoute("/landing")
+                
+                restoration {
+                    conditionalDefaults {
+                        `when` { it.isLoggedIn } then "/home"
+                        otherwise("/login")
+                    }
+                }
+                
+                content("/landing") { }
+                content("/home") { }
+                content("/login") { }
+            }
+        }
+        
+        // Simulate storage restoration lifecycle
+        routerMiddleware.onStorageRestorationStarted()
+        
+        // Verify no routes have been initialized yet
+        assertEquals(0, routerMiddleware.state.value.contentRoutes.size)
+        
+        // Now dispatch a restored state
+        val restoredState = TestAppState(
+            userName = "TestUser",
+            isLoggedIn = true,
+            routerState = RouterState() // Empty router state - conditional defaults should apply
+        )
+        
+        store.dispatch(RestoreStateAction(restoredState))
+        
+        // Complete storage restoration
+        routerMiddleware.onStorageRestorationCompleted(true)
+        
+        // Wait for router state to update
+        routerMiddleware.state.first { it.contentRoutes.isNotEmpty() }
+        
+        // Should have applied conditional default route (/home) instead of initial route (/landing)
+        assertEquals(1, routerMiddleware.state.value.contentRoutes.size)
+        assertEquals("/home", routerMiddleware.state.value.contentRoutes.firstOrNull()?.path)
+    }
+    
+    @Test
     fun `full serialization round trip should preserve router state`() = runTest {
         // Create a store and navigate to some routes
         val store = createStore(TestAppState()) {

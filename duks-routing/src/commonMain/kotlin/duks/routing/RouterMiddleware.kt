@@ -26,8 +26,49 @@ class RouterMiddleware<TState: StateModel>(
     // Public read-only access to router state
     val state: StateFlow<RouterState> = internalState.asStateFlow()
     
+    // Track if storage restoration is in progress
+    private var isRestorationInProgress = false
+    private var storeReference: KStore<TState>? = null
+    // Track if restoration has completed (regardless of whether state was restored)
+    private var restorationCompleted = false
+    // Track if we need to apply initial route after getting store reference
+    private var pendingInitialRoute = false
+    
     override suspend fun onStoreCreated(store: KStore<TState>) {
-        // Don't initialize routes immediately - wait to see if restoration happens
+        // Store reference for later use
+        storeReference = store
+        
+        // Check if we have a pending initial route (restoration completed before onStoreCreated)
+        if (pendingInitialRoute && !hasInitialized) {
+            applyInitialRoute(store)
+            hasInitialized = true
+            pendingInitialRoute = false
+        } else if (!isRestorationInProgress && !restorationCompleted) {
+            applyInitialRoute(store)
+            hasInitialized = true
+        }
+    }
+    
+    override suspend fun onStorageRestorationStarted() {
+        // Mark that restoration is starting
+        isRestorationInProgress = true
+    }
+    
+    override suspend fun onStorageRestorationCompleted(restored: Boolean) {
+        // Mark restoration as complete
+        isRestorationInProgress = false
+        restorationCompleted = true
+        
+        // Only apply initial route if no state was restored (empty storage)
+        // If state was restored, RestoreStateAction will handle initialization
+        if (!restored && !hasInitialized) {
+            if (storeReference != null) {
+                applyInitialRoute(storeReference!!)
+                hasInitialized = true
+            } else {
+                pendingInitialRoute = true
+            }
+        }
     }
 
     override suspend fun invoke(store: KStore<TState>, next: suspend (Action) -> Action, action: Action): Action {
@@ -37,13 +78,6 @@ class RouterMiddleware<TState: StateModel>(
                     // StateChanged actions are just passed through - don't process them again
                     next(action)
                 } else {
-                    // Ensure initialization on first routing action if not restored
-                    if (!hasInitialized && internalState.value.getActiveRoutes().isEmpty()) {
-                        logger.debug { "First routing action received, applying initial route" }
-                        applyInitialRoute(store)
-                        hasInitialized = true
-                    }
-                    
                     val currentState = internalState.value
                     val newState = processRoutingAction(store, action, currentState)
 
@@ -115,11 +149,9 @@ class RouterMiddleware<TState: StateModel>(
                 // Extract router state if the state implements HasRouterState
                 val routerState = when (restoredState) {
                     is HasRouterState -> {
-                        logger.debug { "Found routerState in restored state" }
                         restoredState.routerState
                     }
                     else -> {
-                        logger.debug { "State does not implement HasRouterState interface" }
                         null
                     }
                 }
@@ -133,9 +165,18 @@ class RouterMiddleware<TState: StateModel>(
                         currentState = restoredState
                     )
                 } else {
-                    // No router state - check if we should apply initial route
-                    null
+                    // No router state - check if we should apply conditional defaults
+                    if (restorationStrategy is RestorationStrategy.RestoreWithDefaults<*>) {
+                        @Suppress("UNCHECKED_CAST")
+                        val defaults = restorationStrategy.conditionalDefaults as ConditionalDefaultsConfig<TState>
+                        applyConditionalDefaults(defaults, restoredState, routes)
+                    } else {
+                        null
+                    }
                 }
+                
+                // Pass the action through first so app reducer can process it
+                val result = next(action)
                 
                 if (restoredInternalState != null) {
                     // Log restoration details
@@ -166,26 +207,40 @@ class RouterMiddleware<TState: StateModel>(
                     internalState.value = restoredInternalState
                     hasInitialized = true
                     
-                    // Dispatch state change notification
+                    // Dispatch state change notification AFTER the RestoreStateAction has been processed
+                    // This ensures the app gets the real routes, not the serializable ones
                     store.dispatch(Routing.StateChanged(restoredInternalState))
                 } else {
-                    // No router state restored - apply initial route if configured
-                    applyInitialRoute(store)
-                    hasInitialized = true
+                    // No router state restored - check if we should apply initial route
+                    // Only apply if no routes exist (in case onStoreCreated didn't run yet)
+                    if (!hasRoutes(internalState.value)) {
+                        applyInitialRoute(store)
+                        hasInitialized = true
+                    }
                 }
                 
-                next(action)
+                result
             }
             else -> next(action)
         }
     }
 
     private fun findInitialRoute(): Route<*>? {
+        
         // Use the explicitly set initial route if provided
         initialRoute?.let { path ->
             val normalizedPath = normalizePath(path)
-            return routes.find { it.path == normalizedPath && it.layer == NavigationLayer.Content }
-                ?: routes.find { it.path == normalizedPath }
+            
+            val contentRoute = routes.find { it.path == normalizedPath && it.layer == NavigationLayer.Content }
+            if (contentRoute != null) {
+                return contentRoute
+            }
+            
+            val anyRoute = routes.find { it.path == normalizedPath }
+            if (anyRoute != null) {
+                return anyRoute
+            }
+            
         }
         
         // Only use "/" as default initial route, don't auto-select other routes
@@ -193,7 +248,7 @@ class RouterMiddleware<TState: StateModel>(
             ?: routes.find { it.path == "/" }
     }
     
-    private fun applyInitialRoute(store: KStore<TState>) {
+    private suspend fun applyInitialRoute(store: KStore<TState>) {
         val initialRoute = findInitialRoute()
         if (initialRoute != null) {
             logger.debug(initialRoute.path) { "Applying initial route: {path}" }
@@ -207,9 +262,12 @@ class RouterMiddleware<TState: StateModel>(
             
             internalState.value = initialInternalState
             
-            store.dispatch(Routing.StateChanged(initialInternalState))
-        } else {
-            logger.debug { "No initial route configured" }
+            try {
+                store.dispatch(Routing.StateChanged(initialInternalState))
+            } catch (e: Exception) {
+                logger.error("Failed to dispatch StateChanged: ${e.message}")
+                throw e
+            }
         }
     }
 
@@ -454,12 +512,16 @@ class RouterMiddleware<TState: StateModel>(
             currentState = currentState
         )
         
-        // If no routes after filtering and we have conditional defaults, apply them
-        if (!hasRoutes(filteredRouterState) && strategy is RestorationStrategy.RestoreWithDefaults<*>) {
+        // Always evaluate conditional defaults when using RestoreWithDefaults strategy
+        if (strategy is RestorationStrategy.RestoreWithDefaults<*>) {
             @Suppress("UNCHECKED_CAST")
             val defaults = strategy.conditionalDefaults as ConditionalDefaultsConfig<TState>
             if (currentState != null) {
-                return applyConditionalDefaults(defaults, currentState, availableRoutes)
+                // Apply conditional defaults - if one matches, use it instead of restored routes
+                val conditionalRouterState = applyConditionalDefaults(defaults, currentState, availableRoutes)
+                if (conditionalRouterState != null) {
+                    return conditionalRouterState
+                }
             }
         }
         
@@ -516,11 +578,11 @@ class RouterMiddleware<TState: StateModel>(
         
         val routePath = matchingDefault?.route ?: config.fallbackRoute
         if (routePath == null) {
-            logger.debug("No matching conditional defaults or fallback, returning empty state")
+            logger.debug("No matching conditional defaults or fallback, continuing with restored routes")
             return null
         }
         
-        logger.debug("Applying conditional default route: $routePath")
+        logger.info("Applying conditional default route: $routePath (overriding restored routes)")
         
         // Find the route in available routes
         val route = routes.find { it.path == routePath }

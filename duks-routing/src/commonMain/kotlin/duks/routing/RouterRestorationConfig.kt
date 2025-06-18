@@ -44,7 +44,8 @@ sealed class RestorationStrategy {
     ) : RestorationStrategy()
     
     /**
-     * Restore routes with conditional defaults when no routes are restored.
+     * Restore routes with conditional defaults. When conditions match, the default routes
+     * will override any restored routes, allowing for dynamic routing based on app state.
      */
     data class RestoreWithDefaults<TState: StateModel>(
         val baseStrategy: RestorationStrategy = RestoreAll,
