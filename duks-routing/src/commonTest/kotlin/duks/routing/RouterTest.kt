@@ -1434,6 +1434,7 @@ private fun TestTagsModal() {}
         lateinit var routerMiddleware: RouterMiddleware<TestAppState>
         
         val store = createStore(TestAppState()) {
+            scope(backgroundScope)
             routerMiddleware = routing {
                 content("/") { TestHomeScreen() } // Add root route
                 scene("/splash") { TestSplashScreen() }
@@ -1445,30 +1446,42 @@ private fun TestTagsModal() {}
         
         // Test Scene navigation
         store.routeTo("/splash", layer = NavigationLayer.Scene)
+        runCurrent()
+        advanceUntilIdle()
         routerMiddleware.state.first { it.lastRouteType == RouteType.Scene }
         assertEquals(RouteType.Scene, routerMiddleware.state.value.lastRouteType)
         
         // Test Content navigation
         store.routeTo("/home")
+        runCurrent()
+        advanceUntilIdle()
         routerMiddleware.state.first { it.lastRouteType == RouteType.Content }
         assertEquals(RouteType.Content, routerMiddleware.state.value.lastRouteType)
         
         store.routeTo("/profile")
+        runCurrent()
+        advanceUntilIdle()
         routerMiddleware.state.first { it.lastRouteType == RouteType.Content }
         assertEquals(RouteType.Content, routerMiddleware.state.value.lastRouteType)
         
         // Test Modal navigation
         store.showModal("/compose")
+        runCurrent()
+        advanceUntilIdle()
         routerMiddleware.state.first { it.lastRouteType == RouteType.Modal }
         assertEquals(RouteType.Modal, routerMiddleware.state.value.lastRouteType)
         
         // Test Back navigation (dismiss modal)
         store.goBack()
+        runCurrent()
+        advanceUntilIdle()
         routerMiddleware.state.first { it.lastRouteType == RouteType.Back }
         assertEquals(RouteType.Back, routerMiddleware.state.value.lastRouteType)
         
         // Test Back navigation (content back)
         store.goBack()
+        runCurrent()
+        advanceUntilIdle()
         routerMiddleware.state.first { it.lastRouteType == RouteType.Back }
         assertEquals(RouteType.Back, routerMiddleware.state.value.lastRouteType)
     }
@@ -1667,10 +1680,10 @@ private fun TestTagsModal() {}
         lateinit var routerMiddleware: RouterMiddleware<TestAppState>
         
         val store = createStore(TestAppState()) {
+            scope(backgroundScope)
             routerMiddleware = routing {
                 content("/") { TestHomeScreen() }
-                scope(backgroundScope)
-                
+
                 // Parameterized route using the new DSL
                 content<Product>("/product") { product ->
                     // This should capture the product when rendered
