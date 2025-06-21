@@ -7,6 +7,8 @@ import duks.createStore
 import duks.logging.Logger
 import duks.logging.debug
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlin.test.*
 import kotlin.time.Duration.Companion.seconds
@@ -1667,6 +1669,7 @@ private fun TestTagsModal() {}
         val store = createStore(TestAppState()) {
             routerMiddleware = routing {
                 content("/") { TestHomeScreen() }
+                scope(backgroundScope)
                 
                 // Parameterized route using the new DSL
                 content<Product>("/product") { product ->
@@ -1690,11 +1693,11 @@ private fun TestTagsModal() {}
         // Navigate with a product parameter
         val testProduct = Product("123", "Test Product", 99.99)
         store.routeTo("/product", testProduct)
+        runCurrent()
+        advanceUntilIdle()
         
         // Wait for router middleware state to update
-        routerMiddleware.state.first { state ->
-            state.contentRoutes.any { it.path == "/product" }
-        }
+        routerMiddleware.state.first { it.contentRoutes.any { it.path == "/product" } }
         
         // Get the route instance
         val routeInstance = routerMiddleware.state.value.getCurrentContentRoute()
