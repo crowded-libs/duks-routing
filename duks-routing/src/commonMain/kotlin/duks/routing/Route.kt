@@ -9,5 +9,6 @@ data class Route<out T>(
     val requiresAuth: Boolean = false,
     val content: @Composable () -> Unit,
     val config: T? = null,
-    val renderConditions: List<RenderCondition> = emptyList()
+    val renderConditions: List<RenderCondition> = emptyList(),
+    val requiredFeature: String? = null
 )

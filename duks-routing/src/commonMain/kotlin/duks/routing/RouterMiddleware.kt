@@ -5,6 +5,7 @@ import duks.logging.Logger
 import duks.logging.debug
 import duks.logging.info
 import duks.logging.warn
+import duks.routing.features.FeatureToggleEvaluator
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -15,7 +16,8 @@ class RouterMiddleware<TState: StateModel>(
     private val routes: List<Route<*>>,
     private val fallbackRoute: String = "/404",
     private val initialRoute: String? = null,
-    private val restorationStrategy: RestorationStrategy = RestorationStrategy.RestoreAll
+    private val restorationStrategy: RestorationStrategy = RestorationStrategy.RestoreAll,
+    private val featureToggleEvaluator: FeatureToggleEvaluator? = null
 ) : Middleware<TState>, StoreLifecycleAware<TState> {
     private val logger = Logger.default()
     
@@ -33,6 +35,11 @@ class RouterMiddleware<TState: StateModel>(
     private var restorationCompleted = false
     // Track if we need to apply initial route after getting store reference
     private var pendingInitialRoute = false
+    
+    // Collect all unique features from routes for evaluation
+    private val routeFeatures: Set<String> = routes
+        .mapNotNull { it.requiredFeature }
+        .toSet()
     
     override suspend fun onStoreCreated(store: KStore<TState>) {
         // Store reference for later use
@@ -84,14 +91,18 @@ class RouterMiddleware<TState: StateModel>(
                     if (newState != currentState) {
                         logger.debug(action::class.simpleName) { "Router state changing due to action: {actionType}" }
                         
+                        // Update enabled features based on current app state
+                        val enabledFeatures = evaluateFeatures(store.state.value)
+                        val stateWithFeatures = newState.copy(enabledFeatures = enabledFeatures)
+                        
                         // Update state
-                        internalState.value = newState
+                        internalState.value = stateWithFeatures
 
                         // Pass the original action through
                         val result = next(action)
 
                         // Then dispatch the state change through the store to ensure it reaches all reducers
-                        store.dispatch(Routing.StateChanged(newState))
+                        store.dispatch(Routing.StateChanged(stateWithFeatures))
 
                         result
                     } else {
@@ -138,7 +149,12 @@ class RouterMiddleware<TState: StateModel>(
                         }
                     }
                 }
-                internalState.value = newState
+                
+                // Preserve enabled features when updating device context
+                val stateWithFeatures = newState.copy(
+                    enabledFeatures = evaluateFeatures(store.state.value)
+                )
+                internalState.value = stateWithFeatures
                 next(action)
             }
             is RestoreStateAction<*> -> {
@@ -204,12 +220,16 @@ class RouterMiddleware<TState: StateModel>(
                         logger.debug(restoredPaths) { "Restored routes: {routes}" }
                     }
                     
-                    internalState.value = restoredInternalState
+                    // Update enabled features based on restored state
+                    val enabledFeatures = evaluateFeatures(restoredState)
+                    val stateWithFeatures = restoredInternalState.copy(enabledFeatures = enabledFeatures)
+                    
+                    internalState.value = stateWithFeatures
                     hasInitialized = true
                     
                     // Dispatch state change notification AFTER the RestoreStateAction has been processed
                     // This ensures the app gets the real routes, not the serializable ones
-                    store.dispatch(Routing.StateChanged(restoredInternalState))
+                    store.dispatch(Routing.StateChanged(stateWithFeatures))
                 } else {
                     // No router state restored - check if we should apply initial route
                     // Only apply if no routes exist (in case onStoreCreated didn't run yet)
@@ -254,10 +274,11 @@ class RouterMiddleware<TState: StateModel>(
             logger.debug(initialRoute.path) { "Applying initial route: {path}" }
             
             val instance = createRouteInstance(initialRoute)
+            val enabledFeatures = evaluateFeatures(store.state.value)
             val initialInternalState = when (initialRoute.layer) {
-                NavigationLayer.Scene -> RouterState(sceneRoutes = listOf(instance), lastRouteType = RouteType.Scene)
-                NavigationLayer.Content -> RouterState(contentRoutes = listOf(instance), lastRouteType = RouteType.Content)
-                NavigationLayer.Modal -> RouterState(modalRoutes = listOf(instance), lastRouteType = RouteType.Modal)
+                NavigationLayer.Scene -> RouterState(sceneRoutes = listOf(instance), lastRouteType = RouteType.Scene, enabledFeatures = enabledFeatures)
+                NavigationLayer.Content -> RouterState(contentRoutes = listOf(instance), lastRouteType = RouteType.Content, enabledFeatures = enabledFeatures)
+                NavigationLayer.Modal -> RouterState(modalRoutes = listOf(instance), lastRouteType = RouteType.Modal, enabledFeatures = enabledFeatures)
             }
             
             internalState.value = initialInternalState
@@ -289,7 +310,7 @@ class RouterMiddleware<TState: StateModel>(
         val path = normalizePath(action.path)
         logger.debug(path, action.layer ?: "auto", action.param) { "Navigating to: {path}, layer: {layer}, param: {param}" }
         
-        val matchingRoutes = findMatchingRoutes(path, state.deviceContext)
+        val matchingRoutes = findMatchingRoutes(path, state.deviceContext, store.state.value)
         
         // If layer is specified, filter by it
         val route = if (action.layer != null) {
@@ -301,7 +322,7 @@ class RouterMiddleware<TState: StateModel>(
         if (route == null) {
             logger.warn(path, fallbackRoute) { "Route not found: {path}, attempting fallback to: {fallbackRoute}" }
             // Try fallback
-            val fallbackRoutes = findMatchingRoutes(fallbackRoute, state.deviceContext)
+            val fallbackRoutes = findMatchingRoutes(fallbackRoute, state.deviceContext, store.state.value)
             return fallbackRoutes.firstOrNull()?.let { fallback ->
                 navigateToRoute(fallback, action.param, action.layer ?: fallback.layer, state, action.clearHistory)
             } ?: state
@@ -311,7 +332,7 @@ class RouterMiddleware<TState: StateModel>(
         if (route.requiresAuth && !authConfig.authChecker(store.state.value)) {
             logger.info(path, authConfig.unauthenticatedRoute) { "Authentication required for route: {path}, redirecting to: {unauthPath}" }
             authConfig.onAuthFailure?.invoke(store, route)
-            val authRoutes = findMatchingRoutes(authConfig.unauthenticatedRoute, state.deviceContext)
+            val authRoutes = findMatchingRoutes(authConfig.unauthenticatedRoute, state.deviceContext, store.state.value)
             return authRoutes.firstOrNull()?.let { authRoute ->
                 navigateToRoute(authRoute, action.param, action.layer ?: authRoute.layer, state, action.clearHistory)
             } ?: state
@@ -323,7 +344,7 @@ class RouterMiddleware<TState: StateModel>(
 
     private fun handleReplaceContent(action: Routing.ReplaceContent, state: RouterState): RouterState {
         val path = normalizePath(action.path)
-        val matchingRoutes = findMatchingRoutes(path, state.deviceContext)
+        val matchingRoutes = findMatchingRoutes(path, state.deviceContext, storeReference?.state?.value)
         val route = matchingRoutes.firstOrNull() ?: return state
 
         return when (route.layer) {
@@ -391,7 +412,7 @@ class RouterMiddleware<TState: StateModel>(
         val path = normalizePath(action.path)
         logger.debug(path, action.param) { "Showing modal: {path}, param: {param}" }
         
-        val matchingRoutes = findMatchingRoutes(path, state.deviceContext)
+        val matchingRoutes = findMatchingRoutes(path, state.deviceContext, storeReference?.state?.value)
         val route = matchingRoutes.firstOrNull { it.layer == NavigationLayer.Modal }
         
         if (route == null) {
@@ -460,21 +481,29 @@ class RouterMiddleware<TState: StateModel>(
         }
     }
 
-    private fun findMatchingRoutes(path: String, deviceContext: DeviceContext?): List<Route<*>> {
+    private fun findMatchingRoutes(path: String, deviceContext: DeviceContext?, appState: TState? = null): List<Route<*>> {
         return routes
             .filter { it.path == path }
             .filter { route ->
+                // Check feature requirement
+                if (route.requiredFeature != null && featureToggleEvaluator != null && appState != null) {
+                    if (!featureToggleEvaluator.isFeatureEnabled(appState, route.requiredFeature)) {
+                        return@filter false
+                    }
+                }
+                
+                // Check render conditions
                 if (deviceContext == null || route.renderConditions.isEmpty()) {
                     true
                 } else {
                     route.renderConditions.all { condition ->
-                        evaluateCondition(condition, deviceContext)
+                        evaluateCondition(condition, deviceContext, appState)
                     }
                 }
             }
     }
 
-    private fun evaluateCondition(condition: RenderCondition, context: DeviceContext): Boolean {
+    private fun evaluateCondition(condition: RenderCondition, context: DeviceContext, appState: TState? = null): Boolean {
         return when (condition) {
             is RenderCondition.ScreenSize -> {
                 (condition.minWidth == null || context.screenWidth >= condition.minWidth) &&
@@ -484,8 +513,15 @@ class RouterMiddleware<TState: StateModel>(
             is RenderCondition.DeviceType -> context.deviceType in condition.types
             is RenderCondition.Custom -> condition.check(context)
             is RenderCondition.Composite -> when (condition.operator) {
-                CompositeOperator.AND -> condition.conditions.all { evaluateCondition(it, context) }
-                CompositeOperator.OR -> condition.conditions.any { evaluateCondition(it, context) }
+                CompositeOperator.AND -> condition.conditions.all { evaluateCondition(it, context, appState) }
+                CompositeOperator.OR -> condition.conditions.any { evaluateCondition(it, context, appState) }
+            }
+            is RenderCondition.FeatureEnabled -> {
+                if (featureToggleEvaluator != null && appState != null) {
+                    featureToggleEvaluator.isFeatureEnabled(appState, condition.featureName)
+                } else {
+                    false // Feature cannot be evaluated without evaluator and state
+                }
             }
         }
     }
@@ -559,6 +595,14 @@ class RouterMiddleware<TState: StateModel>(
         return routerState.sceneRoutes.isNotEmpty() || 
                routerState.contentRoutes.isNotEmpty() || 
                routerState.modalRoutes.isNotEmpty()
+    }
+    
+    private fun evaluateFeatures(appState: TState): Set<String> {
+        if (featureToggleEvaluator == null) return emptySet()
+        
+        return routeFeatures.filter { feature ->
+            featureToggleEvaluator.isFeatureEnabled(appState, feature)
+        }.toSet()
     }
     
     private fun <TState: StateModel> applyConditionalDefaults(

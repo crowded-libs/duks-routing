@@ -6,6 +6,7 @@ sealed class RenderCondition {
     data class Orientation(val orientation: ScreenOrientation) : RenderCondition()
     data class DeviceType(val types: Set<DeviceClass>) : RenderCondition()
     data class Custom(val check: (DeviceContext) -> Boolean) : RenderCondition()
+    data class FeatureEnabled(val featureName: String) : RenderCondition()
 
     internal data class Composite(
         val operator: CompositeOperator,

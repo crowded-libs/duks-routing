@@ -3,6 +3,7 @@ package duks.routing
 import androidx.compose.runtime.Composable
 import duks.*
 import duks.logging.*
+import duks.routing.features.FeatureToggleEvaluator
 
 // Store extension methods
 fun <TState: StateModel> KStore<TState>.routeTo(
@@ -37,6 +38,7 @@ class RouterBuilder<TState: StateModel> {
     private val routes = mutableListOf<Route<*>>()
     private var initialRoutePath: String? = null
     private var restorationStrategy: RestorationStrategy = RestorationStrategy.RestoreAll
+    private var featureToggleEvaluator: FeatureToggleEvaluator? = null
     
     // Set the initial route for the application
     fun initialRoute(path: String) {
@@ -50,6 +52,7 @@ class RouterBuilder<TState: StateModel> {
         requiresAuth: Boolean = false,
         config: Any? = null,
         whenCondition: RenderCondition? = null,
+        requiredFeature: String? = null,
         content: @Composable () -> Unit
     ) = route(
         path = path,
@@ -57,6 +60,7 @@ class RouterBuilder<TState: StateModel> {
         requiresAuth = requiresAuth,
         config = config,
         whenCondition = whenCondition,
+        requiredFeature = requiredFeature,
         content = content
     )
     
@@ -66,6 +70,7 @@ class RouterBuilder<TState: StateModel> {
         requiresAuth: Boolean = false,
         config: Any? = null,
         whenCondition: RenderCondition? = null,
+        requiredFeature: String? = null,
         noinline content: @Composable (param: P) -> Unit
     ) = route(
         path = path,
@@ -73,6 +78,7 @@ class RouterBuilder<TState: StateModel> {
         requiresAuth = requiresAuth,
         config = config,
         whenCondition = whenCondition,
+        requiredFeature = requiredFeature,
         content = {
             val param: P = routeParam()
             content(param)
@@ -85,6 +91,7 @@ class RouterBuilder<TState: StateModel> {
         requiresAuth: Boolean = false,
         config: Any? = null,
         whenCondition: RenderCondition? = null,
+        requiredFeature: String? = null,
         content: @Composable () -> Unit
     ) = route(
         path = path,
@@ -92,6 +99,7 @@ class RouterBuilder<TState: StateModel> {
         requiresAuth = requiresAuth,
         config = config,
         whenCondition = whenCondition,
+        requiredFeature = requiredFeature,
         content = content
     )
     
@@ -101,6 +109,7 @@ class RouterBuilder<TState: StateModel> {
         requiresAuth: Boolean = false,
         config: Any? = null,
         whenCondition: RenderCondition? = null,
+        requiredFeature: String? = null,
         noinline content: @Composable (param: P) -> Unit
     ) = route(
         path = path,
@@ -108,6 +117,7 @@ class RouterBuilder<TState: StateModel> {
         requiresAuth = requiresAuth,
         config = config,
         whenCondition = whenCondition,
+        requiredFeature = requiredFeature,
         content = {
             val param: P = routeParam()
             content(param)
@@ -120,6 +130,7 @@ class RouterBuilder<TState: StateModel> {
         requiresAuth: Boolean = false,
         config: Any? = null,
         whenCondition: RenderCondition? = null,
+        requiredFeature: String? = null,
         content: @Composable () -> Unit
     ) = route(
         path = path,
@@ -127,6 +138,7 @@ class RouterBuilder<TState: StateModel> {
         requiresAuth = requiresAuth,
         config = config,
         whenCondition = whenCondition,
+        requiredFeature = requiredFeature,
         content = content
     )
     
@@ -136,6 +148,7 @@ class RouterBuilder<TState: StateModel> {
         requiresAuth: Boolean = false,
         config: Any? = null,
         whenCondition: RenderCondition? = null,
+        requiredFeature: String? = null,
         noinline content: @Composable (param: P) -> Unit
     ) = route(
         path = path,
@@ -143,6 +156,7 @@ class RouterBuilder<TState: StateModel> {
         requiresAuth = requiresAuth,
         config = config,
         whenCondition = whenCondition,
+        requiredFeature = requiredFeature,
         content = {
             val param: P = routeParam()
             content(param)
@@ -157,6 +171,7 @@ class RouterBuilder<TState: StateModel> {
         requiresAuth: Boolean = false,
         config: T? = null,
         whenCondition: RenderCondition? = null,
+        requiredFeature: String? = null,
         content: @Composable () -> Unit
     ): Route<T> {
         logger.debug(path, layer, if (requiresAuth) " (requires auth)" else "") { "Registering route: {path} on layer {layer}{authStatus}" }
@@ -168,7 +183,8 @@ class RouterBuilder<TState: StateModel> {
             requiresAuth = requiresAuth,
             content = content,
             config = config,
-            renderConditions = conditions
+            renderConditions = conditions,
+            requiredFeature = requiredFeature
         )
         routes.add(route)
         return route
@@ -204,11 +220,21 @@ class RouterBuilder<TState: StateModel> {
         logger.debug { "Configured restoration strategy: $restorationStrategy" }
     }
     
+    /**
+     * Configure feature toggle evaluator for the router.
+     */
+    fun featureToggles(evaluator: FeatureToggleEvaluator) {
+        this.featureToggleEvaluator = evaluator
+        logger.debug { "Configured feature toggle evaluator" }
+    }
+    
     fun build(): List<Route<*>> = routes.toList()
     
     fun getInitialRoute(): String? = initialRoutePath
     
     fun getRestorationStrategy(): RestorationStrategy = restorationStrategy
+    
+    fun getFeatureToggleEvaluator(): FeatureToggleEvaluator? = featureToggleEvaluator
 }
 
 // Route group builder
@@ -224,6 +250,7 @@ class RouteGroupBuilder<T, TState: StateModel>(
         requiresAuth: Boolean = groupRequiresAuth,
         config: T? = null,
         whenCondition: RenderCondition? = null,
+        requiredFeature: String? = null,
         content: @Composable () -> Unit
     ) {
         val fullPath = if (pathPrefix != null) "$pathPrefix/$path" else path
@@ -236,6 +263,7 @@ class RouteGroupBuilder<T, TState: StateModel>(
             requiresAuth = requiresAuth,
             config = effectiveConfig,
             whenCondition = conditions.reduceOrNull { acc, condition -> acc and condition },
+            requiredFeature = requiredFeature,
             content = content
         )
     }
@@ -245,6 +273,7 @@ class RouteGroupBuilder<T, TState: StateModel>(
         requiresAuth: Boolean = groupRequiresAuth,
         config: T? = null,
         whenCondition: RenderCondition? = null,
+        requiredFeature: String? = null,
         content: @Composable () -> Unit
     ) {
         val fullPath = if (pathPrefix != null) "$pathPrefix/$path" else path
@@ -257,6 +286,7 @@ class RouteGroupBuilder<T, TState: StateModel>(
             requiresAuth = requiresAuth,
             config = effectiveConfig,
             whenCondition = conditions.reduceOrNull { acc, condition -> acc and condition },
+            requiredFeature = requiredFeature,
             content = content
         )
     }
@@ -267,6 +297,7 @@ class RouteGroupBuilder<T, TState: StateModel>(
         requiresAuth: Boolean = groupRequiresAuth,
         config: T? = null,
         whenCondition: RenderCondition? = null,
+        requiredFeature: String? = null,
         noinline content: @Composable (param: P) -> Unit
     ) {
         val fullPath = if (pathPrefix != null) "$pathPrefix/$path" else path
@@ -279,6 +310,7 @@ class RouteGroupBuilder<T, TState: StateModel>(
             requiresAuth = requiresAuth,
             config = effectiveConfig,
             whenCondition = conditions.reduceOrNull { acc, condition -> acc and condition },
+            requiredFeature = requiredFeature,
             content = {
                 val param: P = routeParam()
                 content(param)
@@ -291,6 +323,7 @@ class RouteGroupBuilder<T, TState: StateModel>(
         requiresAuth: Boolean = groupRequiresAuth,
         config: T? = null,
         whenCondition: RenderCondition? = null,
+        requiredFeature: String? = null,
         noinline content: @Composable (param: P) -> Unit
     ) {
         val fullPath = if (pathPrefix != null) "$pathPrefix/$path" else path
@@ -303,6 +336,7 @@ class RouteGroupBuilder<T, TState: StateModel>(
             requiresAuth = requiresAuth,
             config = effectiveConfig,
             whenCondition = conditions.reduceOrNull { acc, condition -> acc and condition },
+            requiredFeature = requiredFeature,
             content = {
                 val param: P = routeParam()
                 content(param)
@@ -315,6 +349,7 @@ class RouteGroupBuilder<T, TState: StateModel>(
         requiresAuth: Boolean = groupRequiresAuth,
         config: T? = null,
         whenCondition: RenderCondition? = null,
+        requiredFeature: String? = null,
         noinline content: @Composable (param: P) -> Unit
     ) {
         val fullPath = if (pathPrefix != null) "$pathPrefix/$path" else path
@@ -327,6 +362,7 @@ class RouteGroupBuilder<T, TState: StateModel>(
             requiresAuth = requiresAuth,
             config = effectiveConfig,
             whenCondition = conditions.reduceOrNull { acc, condition -> acc and condition },
+            requiredFeature = requiredFeature,
             content = {
                 val param: P = routeParam()
                 content(param)
@@ -339,6 +375,7 @@ class RouteGroupBuilder<T, TState: StateModel>(
         requiresAuth: Boolean = groupRequiresAuth,
         config: T? = null,
         whenCondition: RenderCondition? = null,
+        requiredFeature: String? = null,
         content: @Composable () -> Unit
     ) {
         val fullPath = if (pathPrefix != null) "$pathPrefix/$path" else path
@@ -351,6 +388,7 @@ class RouteGroupBuilder<T, TState: StateModel>(
             requiresAuth = requiresAuth,
             config = effectiveConfig,
             whenCondition = conditions.reduceOrNull { acc, condition -> acc and condition },
+            requiredFeature = requiredFeature,
             content = content
         )
     }
@@ -367,13 +405,15 @@ fun <TState: StateModel> StoreBuilder<TState>.routing(
     val routeList = builder.build()
     val initialRoute = builder.getInitialRoute()
     val restorationStrategy = builder.getRestorationStrategy()
+    val featureToggleEvaluator = builder.getFeatureToggleEvaluator()
     
     val routerMiddleware = RouterMiddleware<TState>(
         authConfig = authConfig,
         routes = routeList,
         fallbackRoute = fallbackRoute,
         initialRoute = initialRoute,
-        restorationStrategy = restorationStrategy
+        restorationStrategy = restorationStrategy,
+        featureToggleEvaluator = featureToggleEvaluator
     )
     
     middleware {

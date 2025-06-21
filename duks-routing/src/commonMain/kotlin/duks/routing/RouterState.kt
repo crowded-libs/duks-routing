@@ -14,7 +14,8 @@ data class RouterState(
     @Serializable(with = RouteInstanceListSerializer::class)
     val modalRoutes: List<RouteInstance> = emptyList(),
     @Contextual val deviceContext: DeviceContext? = null,
-    val lastRouteType: RouteType? = null
+    val lastRouteType: RouteType? = null,
+    val enabledFeatures: Set<String> = emptySet()
 ) : StateModel {
     // Get all active routes across layers
     fun getActiveRoutes(): List<RouteInstance> {
