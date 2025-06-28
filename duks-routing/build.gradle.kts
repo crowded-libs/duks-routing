@@ -15,7 +15,7 @@ plugins {
 }
 
 group = "io.github.crowded-libs"
-version = "0.1.0"
+version = "0.1.1"
 
 kotlin {
     jvm()
@@ -45,7 +45,6 @@ kotlin {
                 implementation(libs.compose.ui)
                 implementation(libs.duks)
                 implementation(libs.kotlinx.coroutines.core)
-                implementation(libs.kotlinx.datetime)
                 implementation(libs.kotlinx.serialization)
             }
         }
