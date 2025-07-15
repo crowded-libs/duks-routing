@@ -22,7 +22,7 @@ A Kotlin Multiplatform routing library with advanced features for managing navig
 
 ```kotlin
 dependencies {
-    implementation("io.crowded-innovations:duks-routing:0.1.1")
+    implementation("io.crowded-innovations:duks-routing:0.1.2")
 }
 ```
 
