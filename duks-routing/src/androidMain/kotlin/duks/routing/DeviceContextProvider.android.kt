@@ -3,36 +3,53 @@ package duks.routing
 import android.app.UiModeManager
 import android.content.Context
 import android.content.res.Configuration
+import android.os.Build
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 
 /**
- * Android-specific device type detection.
- * Determines if the device is a Phone, Tablet, TV, or Watch based on:
- * - UI mode for TV and Watch detection
- * - Screen layout size for distinguishing phones from tablets
- * - Device features for watch detection
+ * Android-specific platform context.
+ * Provides additional platform-specific information that can be used
+ * for more granular device detection and routing decisions.
  */
 @Composable
-actual fun rememberDeviceType(): DeviceClass {
+actual fun getPlatformContext(): Map<String, String> {
     val context = LocalContext.current
     val configuration = LocalConfiguration.current
     
     return remember(configuration) {
-        when {
-            // Check if it's a watch device
-            isWatchDevice(context) -> DeviceClass.Watch
+        buildMap {
+            // Device classification hints
+            put("isWatch", isWatchDevice(context).toString())
+            put("isTV", isTvDevice(context).toString())
+            put("isTablet", isTablet(configuration).toString())
             
-            // Check if it's a TV device
-            isTvDevice(context) -> DeviceClass.TV
+            // UI mode information
+            val uiModeManager = context.getSystemService(Context.UI_MODE_SERVICE) as? UiModeManager
+            uiModeManager?.let {
+                put("uiMode", when(it.currentModeType) {
+                    Configuration.UI_MODE_TYPE_TELEVISION -> "television"
+                    Configuration.UI_MODE_TYPE_WATCH -> "watch"
+                    Configuration.UI_MODE_TYPE_CAR -> "car"
+                    Configuration.UI_MODE_TYPE_DESK -> "desk"
+                    Configuration.UI_MODE_TYPE_APPLIANCE -> "appliance"
+                    Configuration.UI_MODE_TYPE_VR_HEADSET -> "vr"
+                    else -> "normal"
+                })
+            }
             
-            // Check if it's a tablet based on screen size
-            isTablet(configuration) -> DeviceClass.Tablet
+            // Screen density
+            put("screenDensityDpi", configuration.densityDpi.toString())
             
-            // Default to phone
-            else -> DeviceClass.Phone
+            // OS version
+            put("androidVersion", Build.VERSION.SDK_INT.toString())
+            put("androidRelease", Build.VERSION.RELEASE)
+            
+            // Device info
+            put("manufacturer", Build.MANUFACTURER)
+            put("model", Build.MODEL)
         }
     }
 }

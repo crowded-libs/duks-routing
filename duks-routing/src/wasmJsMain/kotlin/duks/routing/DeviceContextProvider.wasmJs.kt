@@ -2,48 +2,48 @@ package duks.routing
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.unit.dp
 
 /**
- * WasmJS-specific device type detection.
- * Uses JavaScript interop to analyze user agent and screen dimensions
- * to determine if the device is a desktop, tablet, or phone.
+ * WasmJS-specific platform context.
+ * Uses JavaScript interop to gather browser and device information.
  */
 @Composable
-actual fun rememberDeviceType(): DeviceClass {
-    val density = LocalDensity.current
-    
+actual fun getPlatformContext(): Map<String, String> {
     return remember {
-        val userAgent = getUserAgent()
-        val screenWidth = getScreenWidth()
-        val screenHeight = getScreenHeight()
-        
-        // Convert pixels to dp for consistent measurement across devices
-        val widthDp = with(density) { screenWidth.dp.value }
-        val heightDp = with(density) { screenHeight.dp.value }
-        val smallestWidthDp = minOf(widthDp, heightDp)
-        
-        when {
-            // Check for TV devices (rare in web, but possible with smart TVs)
-            isTvUserAgent(userAgent) -> DeviceClass.TV
+        buildMap {
+            val userAgent = getUserAgent()
             
-            // Check for mobile devices first (phones and tablets)
-            isMobileUserAgent(userAgent) -> {
-                // Use screen size to distinguish between phone and tablet
-                // Using 600dp as the threshold, consistent with Android
-                if (smallestWidthDp >= 600) {
-                    DeviceClass.Tablet
-                } else {
-                    DeviceClass.Phone
-                }
-            }
+            // User agent for device detection
+            put("userAgent", userAgent)
             
-            // Check for tablet-specific indicators
-            isTabletUserAgent(userAgent) -> DeviceClass.Tablet
+            // Screen information
+            put("screen.width", getScreenWidth().toString())
+            put("screen.height", getScreenHeight().toString())
+            put("screen.availWidth", getAvailableScreenWidth().toString())
+            put("screen.availHeight", getAvailableScreenHeight().toString())
+            put("screen.colorDepth", getColorDepth().toString())
+            put("screen.pixelDepth", getPixelDepth().toString())
             
-            // Default to desktop for all other cases
-            else -> DeviceClass.Desktop
+            // Window information
+            put("window.innerWidth", getWindowInnerWidth().toString())
+            put("window.innerHeight", getWindowInnerHeight().toString())
+            
+            // Device detection hints
+            put("isMobile", isMobileUserAgent(userAgent).toString())
+            put("isTablet", isTabletUserAgent(userAgent).toString())
+            put("isTV", isTvUserAgent(userAgent).toString())
+            
+            // Touch capability
+            put("touchEnabled", isTouchEnabled().toString())
+            
+            // Device pixel ratio for high DPI screens
+            put("devicePixelRatio", getDevicePixelRatio().toString())
+            
+            // Browser language
+            put("language", getBrowserLanguage())
+            
+            // Platform
+            put("platform", getPlatform())
         }
     }
 }
@@ -95,3 +95,17 @@ private fun isTvUserAgent(userAgent: String): Boolean {
     )
     return tvKeywords.any { keyword -> userAgent.contains(keyword) }
 }
+
+/**
+ * Additional JavaScript interop functions for browser information
+ */
+private fun getAvailableScreenWidth(): Int = js("window.screen.availWidth")
+private fun getAvailableScreenHeight(): Int = js("window.screen.availHeight")
+private fun getColorDepth(): Int = js("window.screen.colorDepth")
+private fun getPixelDepth(): Int = js("window.screen.pixelDepth")
+private fun getWindowInnerWidth(): Int = js("window.innerWidth")
+private fun getWindowInnerHeight(): Int = js("window.innerHeight")
+private fun isTouchEnabled(): Boolean = js("'ontouchstart' in window || navigator.maxTouchPoints > 0")
+private fun getDevicePixelRatio(): Float = js("window.devicePixelRatio || 1")
+private fun getBrowserLanguage(): String = js("navigator.language || navigator.userLanguage || 'en'")
+private fun getPlatform(): String = js("navigator.platform || 'unknown'")

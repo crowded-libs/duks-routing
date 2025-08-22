@@ -1,9 +1,10 @@
 package duks.routing
 
-import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.remember
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.unit.dp
 import duks.KStore
 import duks.StateModel
 
@@ -32,37 +33,65 @@ import duks.StateModel
 @Composable
 fun <TState: StateModel> DeviceContextProvider(
     store: KStore<TState>,
-    customProperties: Map<String, Any> = emptyMap(),
+    customProperties: Map<String, String> = emptyMap(),
     content: @Composable () -> Unit
 ) {
-    BoxWithConstraints {
-        val width = constraints.maxWidth
-        val height = constraints.maxHeight
-        val deviceType = rememberDeviceType()
-        val orientation = if (width > height) ScreenOrientation.Landscape else ScreenOrientation.Portrait
-        
-        val deviceContext = remember(width, height, deviceType, orientation, customProperties) {
-            DeviceContext(
-                screenWidth = width,
-                screenHeight = height,
-                deviceType = deviceType,
-                orientation = orientation,
-                customProperties = customProperties
-            )
-        }
-        
-        LaunchedEffect(deviceContext) {
-            store.dispatch(DeviceAction.UpdateDeviceContext(deviceContext))
-        }
-        
-        content()
+    val windowInfo = LocalWindowInfo.current
+    val density = LocalDensity.current
+    
+    // Convert to dp for consistent measurement across devices
+    val widthDp = with(density) { windowInfo.containerSize.width.toDp() }
+    val heightDp = with(density) { windowInfo.containerSize.height.toDp() }
+    
+    // Use smallest dimension to determine device type (consistent regardless of orientation)
+    // This is similar to Android's smallestScreenWidthDp
+    val smallestDimensionDp = minOf(widthDp, heightDp)
+    
+    // Calculate device type based on smallest dimension
+    val deviceType = when {
+        smallestDimensionDp < 600.dp -> DeviceClass.Phone
+        smallestDimensionDp < 900.dp -> DeviceClass.Tablet
+        else -> DeviceClass.Desktop
     }
+    
+    // Get platform-specific context
+    val platformContext = getPlatformContext()
+    
+    // Calculate orientation
+    val orientation = if (windowInfo.containerSize.width > windowInfo.containerSize.height) {
+        ScreenOrientation.Landscape
+    } else {
+        ScreenOrientation.Portrait
+    }
+    
+    // Create device context - no remember, let it recreate on changes
+    val deviceContext = DeviceContext(
+        screenWidth = windowInfo.containerSize.width,
+        screenHeight = windowInfo.containerSize.height,
+        orientation = orientation,
+        deviceType = deviceType,
+        customProperties = platformContext + customProperties
+    )
+    
+    // Dispatch whenever dimensions or other properties change
+    LaunchedEffect(
+        windowInfo.containerSize.width,
+        windowInfo.containerSize.height,
+        deviceType,
+        orientation,
+        platformContext,
+        customProperties
+    ) {
+        store.dispatch(DeviceAction.UpdateDeviceContext(deviceContext))
+    }
+    
+    content()
 }
 
 /**
- * Remember the device type based on platform-specific characteristics.
- * This is the only platform-specific function for device classification.
+ * Get platform-specific context information.
+ * Returns a map of string key-value pairs with platform-specific details.
  */
 @Composable
-expect fun rememberDeviceType(): DeviceClass
+expect fun getPlatformContext(): Map<String, String>
 

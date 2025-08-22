@@ -2,7 +2,6 @@ package duks.routing
 
 import duks.StateModel
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.Contextual
 
 // Router state with layer management
 @Serializable
@@ -13,7 +12,7 @@ data class RouterState(
     val contentRoutes: List<RouteInstance> = emptyList(),
     @Serializable(with = RouteInstanceListSerializer::class)
     val modalRoutes: List<RouteInstance> = emptyList(),
-    @Contextual val deviceContext: DeviceContext? = null,
+    val deviceContext: DeviceContext? = null,
     val lastRouteType: RouteType? = null,
     val enabledFeatures: Set<String> = emptySet()
 ) : StateModel {
