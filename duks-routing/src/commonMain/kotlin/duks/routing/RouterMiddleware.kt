@@ -456,14 +456,24 @@ class RouterMiddleware<TState: StateModel>(
         val instance = createRouteInstance(route, param)
 
         return when (layer) {
-            NavigationLayer.Scene -> state.copy(
-                sceneRoutes = state.sceneRoutes + instance,
-                contentRoutes = emptyList(),
-                modalRoutes = emptyList(),
-                lastRouteType = RouteType.Scene
-            )
+            NavigationLayer.Scene -> if (clearHistory) {
+                state.copy(
+                    sceneRoutes = listOf(instance),
+                    contentRoutes = emptyList(),
+                    modalRoutes = emptyList(),
+                    lastRouteType = RouteType.Scene
+                )
+            } else {
+                state.copy(
+                    sceneRoutes = state.sceneRoutes + instance,
+                    contentRoutes = emptyList(),
+                    modalRoutes = emptyList(),
+                    lastRouteType = RouteType.Scene
+                )
+            }
             NavigationLayer.Content -> if (clearHistory) {
                 state.copy(
+                    sceneRoutes = emptyList(),
                     contentRoutes = listOf(instance),
                     modalRoutes = emptyList(),
                     lastRouteType = RouteType.Content
@@ -474,10 +484,21 @@ class RouterMiddleware<TState: StateModel>(
                     lastRouteType = RouteType.Content
                 )
             }
-            NavigationLayer.Modal -> state.copy(
-                modalRoutes = state.modalRoutes + instance,
-                lastRouteType = RouteType.Modal
-            )
+            NavigationLayer.Modal -> if (clearHistory) {
+                // When clearHistory is true for modal, clear everything and just show the modal
+                // This is an edge case but should be consistent
+                state.copy(
+                    sceneRoutes = emptyList(),
+                    contentRoutes = emptyList(),
+                    modalRoutes = listOf(instance),
+                    lastRouteType = RouteType.Modal
+                )
+            } else {
+                state.copy(
+                    modalRoutes = state.modalRoutes + instance,
+                    lastRouteType = RouteType.Modal
+                )
+            }
         }
     }
 

@@ -1193,6 +1193,148 @@ private fun TestTagsModal() {}
     }
 
     @Test
+    fun `clearHistory should clear all route layers when navigating to content`() = runTest {
+        lateinit var routerMiddleware: RouterMiddleware<TestAppState>
+        
+        val store = createStore(TestAppState()) {
+            scope(backgroundScope)
+            
+            routerMiddleware = routing {
+                scene("/splash") { TestSplashScreen() }
+                scene("/login") { TestLoginScreen() }
+                content("/home") { TestHomeScreen() }
+                content("/profile") { TestProfileScreen() }
+                content("/settings") { TestSettingsScreen() }
+                modal("/compose") { TestComposeModal() }
+            }
+        }
+        
+        // Build up routes across all layers
+        store.routeTo("/splash", layer = NavigationLayer.Scene)
+        routerMiddleware.state.first { it.sceneRoutes.any { it.path == "/splash" } }
+        
+        store.routeTo("/login", layer = NavigationLayer.Scene)
+        routerMiddleware.state.first { it.sceneRoutes.size == 2 }
+        
+        store.routeTo("/home")
+        routerMiddleware.state.first { it.contentRoutes.any { it.path == "/home" } }
+        
+        store.routeTo("/profile")
+        routerMiddleware.state.first { it.contentRoutes.size == 2 }
+        
+        store.showModal("/compose")
+        routerMiddleware.state.first { it.modalRoutes.any { it.path == "/compose" } }
+        
+        // Verify we have routes in all layers
+        assertEquals(2, routerMiddleware.state.value.sceneRoutes.size, "Should have 2 scene routes")
+        assertEquals(2, routerMiddleware.state.value.contentRoutes.size, "Should have 2 content routes")
+        assertEquals(1, routerMiddleware.state.value.modalRoutes.size, "Should have 1 modal route")
+        
+        // Navigate with clearHistory = true
+        store.routeTo("/settings", clearHistory = true)
+        routerMiddleware.state.first { it.contentRoutes.any { it.path == "/settings" } }
+        
+        // All layers should be cleared except the new route
+        assertEquals(0, routerMiddleware.state.value.sceneRoutes.size, "Scene routes should be cleared")
+        assertEquals(1, routerMiddleware.state.value.contentRoutes.size, "Should have only 1 content route")
+        assertEquals("/settings", routerMiddleware.state.value.contentRoutes[0].path)
+        assertEquals(0, routerMiddleware.state.value.modalRoutes.size, "Modal routes should be cleared")
+    }
+
+    @Test
+    fun `clearHistory should clear all route layers when navigating to scene`() = runTest {
+        lateinit var routerMiddleware: RouterMiddleware<TestAppState>
+        
+        val store = createStore(TestAppState()) {
+            scope(backgroundScope)
+            
+            routerMiddleware = routing {
+                scene("/splash") { TestSplashScreen() }
+                scene("/login") { TestLoginScreen() }
+                scene("/main") { TestHomeScreen() }
+                content("/home") { TestHomeScreen() }
+                content("/profile") { TestProfileScreen() }
+                modal("/compose") { TestComposeModal() }
+            }
+        }
+        
+        // Build up routes across all layers
+        store.routeTo("/splash", layer = NavigationLayer.Scene)
+        routerMiddleware.state.first { it.sceneRoutes.any { it.path == "/splash" } }
+        
+        store.routeTo("/login", layer = NavigationLayer.Scene)
+        routerMiddleware.state.first { it.sceneRoutes.size == 2 }
+        
+        store.routeTo("/home")
+        routerMiddleware.state.first { it.contentRoutes.any { it.path == "/home" } }
+        
+        store.routeTo("/profile")
+        routerMiddleware.state.first { it.contentRoutes.size == 2 }
+        
+        store.showModal("/compose")
+        routerMiddleware.state.first { it.modalRoutes.any { it.path == "/compose" } }
+        
+        // Verify we have routes in all layers
+        assertEquals(2, routerMiddleware.state.value.sceneRoutes.size, "Should have 2 scene routes")
+        assertEquals(2, routerMiddleware.state.value.contentRoutes.size, "Should have 2 content routes")
+        assertEquals(1, routerMiddleware.state.value.modalRoutes.size, "Should have 1 modal route")
+        
+        // Navigate to scene with clearHistory = true
+        store.routeTo("/main", layer = NavigationLayer.Scene, clearHistory = true)
+        routerMiddleware.state.first { it.sceneRoutes.any { it.path == "/main" } }
+        
+        // All layers should be cleared, only the new scene route should exist
+        assertEquals(1, routerMiddleware.state.value.sceneRoutes.size, "Should have only 1 scene route")
+        assertEquals("/main", routerMiddleware.state.value.sceneRoutes[0].path)
+        assertEquals(0, routerMiddleware.state.value.contentRoutes.size, "Content routes should be cleared")
+        assertEquals(0, routerMiddleware.state.value.modalRoutes.size, "Modal routes should be cleared")
+    }
+
+    @Test
+    fun `clearHistory should work correctly with modals`() = runTest {
+        lateinit var routerMiddleware: RouterMiddleware<TestAppState>
+        
+        val store = createStore(TestAppState()) {
+            scope(backgroundScope)
+            
+            routerMiddleware = routing {
+                content("/home") { TestHomeScreen() }
+                content("/profile") { TestProfileScreen() }
+                modal("/compose") { TestComposeModal() }
+                modal("/photo") { TestPhotoModal() }
+            }
+        }
+        
+        // Build up navigation stack
+        store.routeTo("/home")
+        routerMiddleware.state.first { it.contentRoutes.any { it.path == "/home" } }
+        
+        store.routeTo("/profile")
+        routerMiddleware.state.first { it.contentRoutes.size == 2 }
+        
+        store.showModal("/compose")
+        routerMiddleware.state.first { it.modalRoutes.any { it.path == "/compose" } }
+        
+        store.showModal("/photo")
+        routerMiddleware.state.first { it.modalRoutes.size == 2 }
+        
+        // Verify stack state
+        assertEquals(2, routerMiddleware.state.value.contentRoutes.size)
+        assertEquals(2, routerMiddleware.state.value.modalRoutes.size)
+        
+        // Navigate with clearHistory should clear everything including modals
+        store.routeTo("/home", clearHistory = true)
+        routerMiddleware.state.first { 
+            it.contentRoutes.size == 1 && it.contentRoutes[0].path == "/home"
+        }
+        
+        // Verify all cleared
+        assertEquals(1, routerMiddleware.state.value.contentRoutes.size)
+        assertEquals("/home", routerMiddleware.state.value.contentRoutes[0].path)
+        assertEquals(0, routerMiddleware.state.value.modalRoutes.size, "All modals should be cleared")
+    }
+
+    @Test
     fun `scene routes should maintain proper history stack`() = runTest {
         lateinit var routerMiddleware: RouterMiddleware<TestAppState>
         
