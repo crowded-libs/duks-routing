@@ -3,8 +3,8 @@
 A Kotlin Multiplatform routing library with advanced features for managing navigation in compose-based applications.
 
 [![Build](https://github.com/crowded-libs/duks-routing/actions/workflows/build.yml/badge.svg)](https://github.com/crowded-libs/duks-routing/actions/workflows/build.yml)
-[![Kotlin](https://img.shields.io/badge/kotlin-2.1.21-blue.svg?logo=kotlin)](http://kotlinlang.org)
-[![Compose Multiplatform](https://img.shields.io/badge/Compose%20Multiplatform-v1.8.1-blue)](https://github.com/JetBrains/compose-multiplatform)
+[![Kotlin](https://img.shields.io/badge/kotlin-2.2.20-blue.svg?logo=kotlin)](http://kotlinlang.org)
+[![Compose Multiplatform](https://img.shields.io/badge/Compose%20Multiplatform-v1.9.0-blue)](https://github.com/JetBrains/compose-multiplatform)
 [![Maven Central](https://img.shields.io/maven-central/v/io.github.crowded-libs/duks-routing.svg?label=Maven%20Central)](https://search.maven.org/search?q=g:%22io.github.crowded-libs%22%20AND%20a:%22duks-routing%22)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
@@ -22,7 +22,7 @@ A Kotlin Multiplatform routing library with advanced features for managing navig
 
 ```kotlin
 dependencies {
-    implementation("io.crowded-innovations:duks-routing:0.1.2")
+    implementation("io.crowded-innovations:duks-routing:0.1.4")
 }
 ```
 

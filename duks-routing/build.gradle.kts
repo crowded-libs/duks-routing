@@ -14,7 +14,7 @@ plugins {
 }
 
 group = "io.github.crowded-libs"
-version = "0.1.3"
+version = "0.1.4"
 
 kotlin {
     jvm()
@@ -53,6 +53,12 @@ kotlin {
                 implementation(libs.kotlin.test)
                 implementation(libs.kotlinx.coroutines.test)
                 implementation(libs.kotlinx.serialization.json)
+            }
+        }
+
+        val wasmJsMain by getting {
+            languageSettings.apply {
+                optIn("kotlin.js.ExperimentalWasmJsInterop")
             }
         }
     }
