@@ -28,7 +28,7 @@ jobs:
       should_run: ${{ steps.filter.outputs.src_changed }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v2
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -37,6 +37,8 @@ jobs:
               - 'build.gradle.kts'
               - 'gradle.properties'
               - 'settings.gradle.kts'
+              - 'gradle/libs.versions.toml'
+              - 'gradle/wrapper/**'
               - '.github/workflows/**'
   
   build:
