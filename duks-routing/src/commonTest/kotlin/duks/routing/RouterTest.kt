@@ -1132,6 +1132,61 @@ private fun TestTagsModal() {}
     }
 
     @Test
+    fun `goBack dismisses single content overlay over scene`() = runTest {
+        lateinit var routerMiddleware: RouterMiddleware<TestAppState>
+
+        val store = createStore(TestAppState()) {
+            scope(backgroundScope)
+
+            routerMiddleware = routing {
+                scene("/tabs") { TestHomeScreen() }
+                content("/detail") { TestProfileScreen() }
+            }
+        }
+
+        store.routeTo("/tabs", layer = NavigationLayer.Scene)
+        routerMiddleware.state.first { it.sceneRoutes.any { r -> r.path == "/tabs" } }
+
+        store.routeTo("/detail", layer = NavigationLayer.Content)
+        routerMiddleware.state.first {
+            it.contentRoutes.size == 1 && it.contentRoutes.last().path == "/detail"
+        }
+
+        store.goBack()
+        routerMiddleware.state.first {
+            it.contentRoutes.isEmpty() &&
+                it.sceneRoutes.size == 1 &&
+                it.sceneRoutes.last().path == "/tabs" &&
+                it.lastRouteType == RouteType.Back
+        }
+
+        assertEquals(0, routerMiddleware.state.value.contentRoutes.size)
+        assertEquals("/tabs", routerMiddleware.state.value.sceneRoutes.single().path)
+    }
+
+    @Test
+    fun `goBack preserves lone content root without scene`() = runTest {
+        lateinit var routerMiddleware: RouterMiddleware<TestAppState>
+
+        val store = createStore(TestAppState()) {
+            scope(backgroundScope)
+
+            routerMiddleware = routing {
+                content("/home") { TestHomeScreen() }
+            }
+        }
+
+        store.routeTo("/home")
+        routerMiddleware.state.first { it.contentRoutes.size == 1 }
+
+        store.goBack()
+        advanceUntilIdle()
+
+        assertEquals(1, routerMiddleware.state.value.contentRoutes.size)
+        assertEquals("/home", routerMiddleware.state.value.contentRoutes.single().path)
+    }
+
+    @Test
     fun `clear history navigation should reset route stack`() = runTest {
         lateinit var routerMiddleware: RouterMiddleware<TestAppState>
         var currentPath: String?

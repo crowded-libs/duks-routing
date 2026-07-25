@@ -365,10 +365,18 @@ class RouterMiddleware<TState: StateModel>(
                     lastRouteType = RouteType.Back
                 )
             }
-            state.contentRoutes.size > 1 -> {
-                logger.debug(state.contentRoutes.last().path, state.contentRoutes[state.contentRoutes.size - 2].path) { "Going back: from {fromPath} to {toPath}" }
+            // Pop content when stacked, or when a single content overlay sits on a scene
+            // (scene + content detail). A lone content root with no scene is preserved.
+            state.contentRoutes.size > 1 ||
+                (state.contentRoutes.isNotEmpty() && state.sceneRoutes.isNotEmpty()) -> {
+                val fromPath = state.contentRoutes.last().path
+                val remaining = state.contentRoutes.dropLast(1)
+                val toPath = remaining.lastOrNull()?.path
+                    ?: state.sceneRoutes.lastOrNull()?.path
+                    ?: "(empty)"
+                logger.debug(fromPath, toPath) { "Going back: from {fromPath} to {toPath}" }
                 state.copy(
-                    contentRoutes = state.contentRoutes.dropLast(1),
+                    contentRoutes = remaining,
                     lastRouteType = RouteType.Back
                 )
             }
