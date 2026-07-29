@@ -365,23 +365,33 @@ class RouterMiddleware<TState: StateModel>(
             matchingRoutes.firstOrNull()
         }
 
+        val mode = resolveNavigationMode(action)
+
         if (route == null) {
             logger.warn(path, fallbackRoute) { "Route not found: {path}, attempting fallback to: {fallbackRoute}" }
             // Try fallback
             val fallbackRoutes = findMatchingRoutes(fallbackRoute, state.deviceContext, store.state.value)
             return fallbackRoutes.firstOrNull()?.let { fallback ->
-                navigateToRoute(fallback, action.param, action.layer ?: fallback.layer, state, action.clearHistory)
+                navigateToRoute(fallback, action.param, action.layer ?: fallback.layer, state, mode)
             } ?: state
         }
 
         // Check authentication
         if (route.requiresAuth && !authConfig.authChecker(store.state.value)) {
-            return redirectForAuthFailure(store, route, state, clearHistory = action.clearHistory)
+            return redirectForAuthFailure(
+                store,
+                route,
+                state,
+                mode = if (mode == NavigationMode.ClearHistory) mode else NavigationMode.Push
+            )
         }
 
-        logger.debug(route.path, route.layer) { "Successfully navigating to route: {routePath} on layer: {routeLayer}" }
-        return navigateToRoute(route, action.param, action.layer ?: route.layer, state, action.clearHistory)
+        logger.debug(route.path, route.layer, mode) { "Successfully navigating to route: {routePath} on layer: {routeLayer} mode={mode}" }
+        return navigateToRoute(route, action.param, action.layer ?: route.layer, state, mode)
     }
+
+    private fun resolveNavigationMode(action: Routing.NavigateTo): NavigationMode =
+        if (action.clearHistory) NavigationMode.ClearHistory else action.mode
 
     private fun handleReplaceContent(store: KStore<TState>, action: Routing.ReplaceContent, state: RouterState): RouterState {
         val path = normalizePath(action.path)
@@ -389,12 +399,13 @@ class RouterMiddleware<TState: StateModel>(
         val route = matchingRoutes.firstOrNull() ?: return state
 
         if (route.requiresAuth && !authConfig.authChecker(store.state.value)) {
-            return redirectForAuthFailure(store, route, state, clearHistory = false)
+            return redirectForAuthFailure(store, route, state)
         }
 
         return when (route.layer) {
             NavigationLayer.Content -> state.copy(
                 contentRoutes = listOf(createRouteInstance(route, action.param)),
+                modalRoutes = emptyList(),
                 lastRouteType = RouteType.Content
             )
             else -> state
@@ -442,16 +453,36 @@ class RouterMiddleware<TState: StateModel>(
 
     private fun handlePopToPath(action: Routing.PopToPath, state: RouterState): RouterState {
         val path = normalizePath(action.path)
-        val contentIndex = state.contentRoutes.indexOfLast { it.path == path }
 
-        return if (contentIndex >= 0) {
-            state.copy(
-                contentRoutes = state.contentRoutes.take(contentIndex + 1),
+        // Prefer the uppermost layer that still contains the path (modals → content → scene)
+        val modalIndex = state.modalRoutes.indexOfLast { it.path == path }
+        if (modalIndex >= 0) {
+            return state.copy(
+                modalRoutes = state.modalRoutes.take(modalIndex + 1),
                 lastRouteType = RouteType.Back
             )
-        } else {
-            state
         }
+
+        val contentIndex = state.contentRoutes.indexOfLast { it.path == path }
+        if (contentIndex >= 0) {
+            return state.copy(
+                contentRoutes = state.contentRoutes.take(contentIndex + 1),
+                modalRoutes = emptyList(),
+                lastRouteType = RouteType.Back
+            )
+        }
+
+        val sceneIndex = state.sceneRoutes.indexOfLast { it.path == path }
+        if (sceneIndex >= 0) {
+            return state.copy(
+                sceneRoutes = state.sceneRoutes.take(sceneIndex + 1),
+                contentRoutes = emptyList(),
+                modalRoutes = emptyList(),
+                lastRouteType = RouteType.Back
+            )
+        }
+
+        return state
     }
 
     private fun handleClearLayer(action: Routing.ClearLayer, state: RouterState): RouterState {
@@ -475,7 +506,7 @@ class RouterMiddleware<TState: StateModel>(
         }
 
         if (route.requiresAuth && !authConfig.authChecker(store.state.value)) {
-            return redirectForAuthFailure(store, route, state, clearHistory = false)
+            return redirectForAuthFailure(store, route, state)
         }
 
         return state.copy(
@@ -508,7 +539,7 @@ class RouterMiddleware<TState: StateModel>(
         store: KStore<TState>,
         route: Route<*>,
         state: RouterState,
-        clearHistory: Boolean
+        mode: NavigationMode = NavigationMode.Push
     ): RouterState {
         logger.info(route.path, authConfig.unauthenticatedRoute) {
             "Authentication required for route: {path}, redirecting to: {unauthPath}"
@@ -521,7 +552,7 @@ class RouterMiddleware<TState: StateModel>(
         )
         // Always use the unauthenticated route's layer (not the protected route's layer)
         return authRoutes.firstOrNull()?.let { authRoute ->
-            navigateToRoute(authRoute, param = null, authRoute.layer, state, clearHistory)
+            navigateToRoute(authRoute, param = null, authRoute.layer, state, mode)
         } ?: state
     }
 
@@ -577,50 +608,102 @@ class RouterMiddleware<TState: StateModel>(
         param: Any?,
         layer: NavigationLayer,
         state: RouterState,
-        clearHistory: Boolean = false
+        mode: NavigationMode = NavigationMode.Push
     ): RouterState {
         val instance = createRouteInstance(route, param)
 
-        return when (layer) {
-            NavigationLayer.Scene -> if (clearHistory) {
-                state.copy(
+        return when (mode) {
+            NavigationMode.ClearHistory -> when (layer) {
+                NavigationLayer.Scene -> state.copy(
                     sceneRoutes = listOf(instance),
                     contentRoutes = emptyList(),
                     modalRoutes = emptyList(),
                     lastRouteType = RouteType.Scene
                 )
-            } else {
-                state.copy(
-                    sceneRoutes = state.sceneRoutes + instance,
-                    contentRoutes = emptyList(),
-                    modalRoutes = emptyList(),
-                    lastRouteType = RouteType.Scene
-                )
-            }
-            NavigationLayer.Content -> if (clearHistory) {
-                state.copy(
+                NavigationLayer.Content -> state.copy(
                     sceneRoutes = emptyList(),
                     contentRoutes = listOf(instance),
                     modalRoutes = emptyList(),
                     lastRouteType = RouteType.Content
                 )
-            } else {
-                state.copy(
-                    contentRoutes = state.contentRoutes + instance,
-                    lastRouteType = RouteType.Content
-                )
-            }
-            NavigationLayer.Modal -> if (clearHistory) {
-                // When clearHistory is true for modal, clear everything and just show the modal
-                // This is an edge case but should be consistent
-                state.copy(
+                NavigationLayer.Modal -> state.copy(
                     sceneRoutes = emptyList(),
                     contentRoutes = emptyList(),
                     modalRoutes = listOf(instance),
                     lastRouteType = RouteType.Modal
                 )
-            } else {
-                state.copy(
+            }
+
+            NavigationMode.ReplaceLayer -> when (layer) {
+                // Tab roots: single scene, drop overlays
+                NavigationLayer.Scene -> state.copy(
+                    sceneRoutes = listOf(instance),
+                    contentRoutes = emptyList(),
+                    modalRoutes = emptyList(),
+                    lastRouteType = RouteType.Scene
+                )
+                // Detail root on content: keep scenes, drop modals
+                NavigationLayer.Content -> state.copy(
+                    contentRoutes = listOf(instance),
+                    modalRoutes = emptyList(),
+                    lastRouteType = RouteType.Content
+                )
+                NavigationLayer.Modal -> state.copy(
+                    modalRoutes = listOf(instance),
+                    lastRouteType = RouteType.Modal
+                )
+            }
+
+            NavigationMode.SingleTop -> when (layer) {
+                NavigationLayer.Scene -> {
+                    val scenes = if (state.sceneRoutes.lastOrNull()?.path == instance.path) {
+                        state.sceneRoutes.dropLast(1) + instance
+                    } else {
+                        state.sceneRoutes + instance
+                    }
+                    state.copy(
+                        sceneRoutes = scenes,
+                        contentRoutes = emptyList(),
+                        modalRoutes = emptyList(),
+                        lastRouteType = RouteType.Scene
+                    )
+                }
+                NavigationLayer.Content -> {
+                    val contents = if (state.contentRoutes.lastOrNull()?.path == instance.path) {
+                        state.contentRoutes.dropLast(1) + instance
+                    } else {
+                        state.contentRoutes + instance
+                    }
+                    state.copy(
+                        contentRoutes = contents,
+                        lastRouteType = RouteType.Content
+                    )
+                }
+                NavigationLayer.Modal -> {
+                    val modals = if (state.modalRoutes.lastOrNull()?.path == instance.path) {
+                        state.modalRoutes.dropLast(1) + instance
+                    } else {
+                        state.modalRoutes + instance
+                    }
+                    state.copy(
+                        modalRoutes = modals,
+                        lastRouteType = RouteType.Modal
+                    )
+                }
+            }
+
+            NavigationMode.Push -> when (layer) {
+                NavigationLayer.Scene -> state.copy(
+                    sceneRoutes = state.sceneRoutes + instance,
+                    contentRoutes = emptyList(),
+                    modalRoutes = emptyList(),
+                    lastRouteType = RouteType.Scene
+                )
+                NavigationLayer.Content -> state.copy(
+                    contentRoutes = state.contentRoutes + instance,
+                    lastRouteType = RouteType.Content
+                )
+                NavigationLayer.Modal -> state.copy(
                     modalRoutes = state.modalRoutes + instance,
                     lastRouteType = RouteType.Modal
                 )

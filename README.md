@@ -241,6 +241,16 @@ store.routeTo("/product/details", param = Product(id = "123"))
 
 // Reset stacks while navigating (e.g. after logout)
 store.routeTo("/login", clearHistory = true)
+// equivalent:
+store.routeTo("/login", mode = NavigationMode.ClearHistory)
+
+// Tab-style scene switch: single scene root, clear content + modals
+store.switchScene("/home")
+// equivalent:
+store.routeTo("/home", layer = NavigationLayer.Scene, mode = NavigationMode.ReplaceLayer)
+
+// Single-top on the target layer (replace top if same path, else push)
+store.routeTo("/item", param = id, mode = NavigationMode.SingleTop)
 
 // Go back (no-op at root; does not flip lastRouteType)
 store.goBack()
@@ -251,9 +261,18 @@ store.showModal("/filter", param = FilterOptions())
 // Dismiss modal
 store.dismissModal()
 
-// Pop to specific content route
+// Pop to a path in modal, content, or scene stacks (clears higher overlays)
 store.popToRoute("/home")
 ```
+
+### Navigation modes
+
+| Mode | Behavior |
+|---|---|
+| `Push` (default) | Append on the target layer. Scene pushes still clear content + modals. |
+| `SingleTop` | If the top of the target layer already matches the path, replace it; otherwise push. |
+| `ReplaceLayer` | Replace only that layer’s stack. Scenes also clear content + modals (tab roots). Content clears modals and keeps scenes. |
+| `ClearHistory` | Clear all layers and open the destination alone. |
 
 ### Reading router state
 

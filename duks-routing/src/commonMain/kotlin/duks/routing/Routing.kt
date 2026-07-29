@@ -8,12 +8,13 @@ sealed class Routing : Action {
         val path: String,
         val layer: NavigationLayer? = null,
         @Deprecated(
-            message = "Unused; use clearHistory for stack reset. Will be removed in a future release.",
+            message = "Unused; use clearHistory or NavigationMode. Will be removed in a future release.",
             level = DeprecationLevel.WARNING
         )
         val preserveNavigation: Boolean = true,
         val param: Any? = null,
-        val clearHistory: Boolean = false
+        val clearHistory: Boolean = false,
+        val mode: NavigationMode = NavigationMode.Push
     ) : Routing()
 
     data class ReplaceContent(

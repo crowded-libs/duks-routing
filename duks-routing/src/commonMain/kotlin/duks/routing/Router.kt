@@ -12,10 +12,29 @@ fun <TState: StateModel> KStore<TState>.routeTo(
     layer: NavigationLayer? = null,
     @Suppress("DEPRECATION")
     preserveNavigation: Boolean = true,
-    clearHistory: Boolean = false
+    clearHistory: Boolean = false,
+    mode: NavigationMode = NavigationMode.Push
 ) {
     @Suppress("DEPRECATION")
-    dispatch(Routing.NavigateTo(path, layer, preserveNavigation, param, clearHistory))
+    dispatch(
+        Routing.NavigateTo(
+            path = path,
+            layer = layer,
+            preserveNavigation = preserveNavigation,
+            param = param,
+            clearHistory = clearHistory,
+            mode = mode
+        )
+    )
+}
+
+/**
+ * Navigate to a scene root suitable for tab-style switches: the scene stack becomes only
+ * [path], and content/modal stacks are cleared. Equivalent to
+ * `routeTo(path, layer = Scene, mode = ReplaceLayer)`.
+ */
+fun <TState: StateModel> KStore<TState>.switchScene(path: String, param: Any? = null) {
+    routeTo(path, param = param, layer = NavigationLayer.Scene, mode = NavigationMode.ReplaceLayer)
 }
 
 fun <TState: StateModel> KStore<TState>.goBack() {
