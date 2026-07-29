@@ -198,7 +198,7 @@ fun MovieScreen(store: KStore<AppState>) {
 
 - **Preview-Friendly**: No composition locals needed, works great with Compose previews
 - **Type-Safe**: Full Kotlin type safety with compile-time checks
-- **Performance**: Features are cached in RouterState and only re-evaluated on state changes
+- **Performance**: Features used by routes are cached on `RouterState` and refreshed on routing and device updates
 - **Flexible**: Supports any evaluation logic including remote config, user properties, or experiments
 
 ## State Restoration
@@ -210,20 +210,24 @@ routing {
     restoration {
         // Restore all routes (default)
         restoreAll()
-        
-        // Or restore only modals
-        restoreOnly(NavigationLayer.Modal)
-        
-        // Or use conditional defaults
-        restoreWithDefaults {
-            when {
-                state.user == null -> "/login"
-                state.user.isOnboarded -> "/home"
-                else -> "/onboarding"
-            }
+
+        // Or restore only selected route types
+        restoreOnly(RouteType.Scene, RouteType.Content)
+
+        // Conditional defaults override restored routes when a condition matches
+        conditionalDefaults {
+            `when` { state -> state.user == null } then "/login"
+            `when` { state -> state.user?.isOnboarded == true } then "/home"
+            otherwise("/onboarding")
         }
     }
 }
+```
+
+Apps that implement `HasRouterState` should copy `Routing.StateChanged` into their root state:
+
+```kotlin
+is Routing.StateChanged -> state.copy(routerState = action.routerState)
 ```
 
 ## Navigation Actions
@@ -235,7 +239,10 @@ store.routeTo("/products")
 // Navigate with parameters
 store.routeTo("/product/details", param = Product(id = "123"))
 
-// Go back
+// Reset stacks while navigating (e.g. after logout)
+store.routeTo("/login", clearHistory = true)
+
+// Go back (no-op at root; does not flip lastRouteType)
 store.goBack()
 
 // Show modal
@@ -244,6 +251,21 @@ store.showModal("/filter", param = FilterOptions())
 // Dismiss modal
 store.dismissModal()
 
-// Pop to specific route
+// Pop to specific content route
 store.popToRoute("/home")
 ```
+
+### Reading router state
+
+```kotlin
+val primary = routerState.primaryRoute()   // content overlay, else scene
+val canBack = routerState.canGoBack()
+val titleConfig = routerState.primaryConfig<ScaffoldConfig>()
+if (route.pathEquals("/home")) { /* tab selected */ }
+```
+
+### Auth session loss
+
+When `AuthConfig.revalidateOnSessionLoss` is true (default), a transition from authenticated
+to unauthenticated while protected routes are active clears the stack and navigates to
+`unauthenticatedRoute`.

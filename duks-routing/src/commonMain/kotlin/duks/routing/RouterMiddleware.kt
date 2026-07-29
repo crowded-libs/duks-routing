@@ -35,6 +35,8 @@ class RouterMiddleware<TState: StateModel>(
     private var restorationCompleted = false
     // Track if we need to apply initial route after getting store reference
     private var pendingInitialRoute = false
+    // Last observed auth result for session-loss revalidation
+    private var lastKnownAuthenticated: Boolean? = null
     
     // Collect all unique features from routes for evaluation
     private val routeFeatures: Set<String> = routes
@@ -44,6 +46,7 @@ class RouterMiddleware<TState: StateModel>(
     override suspend fun onStoreCreated(store: KStore<TState>) {
         // Store reference for later use
         storeReference = store
+        lastKnownAuthenticated = authConfig.authChecker(store.state.value)
         
         // Check if we have a pending initial route (restoration completed before onStoreCreated)
         if (pendingInitialRoute && !hasInitialized) {
@@ -54,6 +57,16 @@ class RouterMiddleware<TState: StateModel>(
             applyInitialRoute(store)
             hasInitialized = true
         }
+    }
+
+    override suspend fun onStoreDestroyed() {
+        storeReference = null
+        hasInitialized = false
+        isRestorationInProgress = false
+        restorationCompleted = false
+        pendingInitialRoute = false
+        lastKnownAuthenticated = null
+        internalState.value = RouterState()
     }
     
     override suspend fun onStorageRestorationStarted() {
@@ -101,8 +114,8 @@ class RouterMiddleware<TState: StateModel>(
                         // Pass the original action through
                         val result = next(action)
 
-                        // Then dispatch the state change through the store to ensure it reaches all reducers
-                        store.dispatch(Routing.StateChanged(stateWithFeatures))
+                        // Await so app HasRouterState stays in lockstep with middleware state
+                        publishStateChanged(store, stateWithFeatures)
 
                         result
                     } else {
@@ -120,7 +133,7 @@ class RouterMiddleware<TState: StateModel>(
                         currentState.copy(deviceContext = action.context)
                     }
                     is DeviceAction.UpdateScreenSize -> {
-                        val deviceType = determineDeviceType(action.width)
+                        val deviceType = DeviceClassHeuristics.fromDimensions(action.width, action.height)
                         logger.debug(action.width, action.height, deviceType) { "Updating screen size: {width}x{height}, detected device type: {deviceType}" }
                         
                         val context = currentState.deviceContext ?: DeviceContext(
@@ -133,7 +146,8 @@ class RouterMiddleware<TState: StateModel>(
                             deviceContext = context.copy(
                                 screenWidth = action.width,
                                 screenHeight = action.height,
-                                orientation = if (action.width > action.height) ScreenOrientation.Landscape else ScreenOrientation.Portrait
+                                orientation = if (action.width > action.height) ScreenOrientation.Landscape else ScreenOrientation.Portrait,
+                                deviceType = deviceType
                             )
                         )
                     }
@@ -154,8 +168,12 @@ class RouterMiddleware<TState: StateModel>(
                 val stateWithFeatures = newState.copy(
                     enabledFeatures = evaluateFeatures(store.state.value)
                 )
-                internalState.value = stateWithFeatures
-                next(action)
+                val result = next(action)
+                if (stateWithFeatures != currentState) {
+                    internalState.value = stateWithFeatures
+                    publishStateChanged(store, stateWithFeatures)
+                }
+                result
             }
             is RestoreStateAction<*> -> {
                 @Suppress("UNCHECKED_CAST") 
@@ -226,10 +244,11 @@ class RouterMiddleware<TState: StateModel>(
                     
                     internalState.value = stateWithFeatures
                     hasInitialized = true
+                    lastKnownAuthenticated = authConfig.authChecker(restoredState)
                     
                     // Dispatch state change notification AFTER the RestoreStateAction has been processed
                     // This ensures the app gets the real routes, not the serializable ones
-                    store.dispatch(Routing.StateChanged(stateWithFeatures))
+                    publishStateChanged(store, stateWithFeatures)
                 } else {
                     // No router state restored - check if we should apply initial route
                     // Only apply if no routes exist (in case onStoreCreated didn't run yet)
@@ -241,7 +260,34 @@ class RouterMiddleware<TState: StateModel>(
                 
                 result
             }
-            else -> next(action)
+            else -> {
+                val wasAuthenticated = lastKnownAuthenticated
+                    ?: authConfig.authChecker(store.state.value)
+                val result = next(action)
+                val isAuthenticated = authConfig.authChecker(store.state.value)
+                lastKnownAuthenticated = isAuthenticated
+
+                if (authConfig.revalidateOnSessionLoss &&
+                    wasAuthenticated &&
+                    !isAuthenticated &&
+                    hasProtectedRoutesActive(internalState.value)
+                ) {
+                    logger.info(authConfig.unauthenticatedRoute) {
+                        "Session loss detected with protected routes active; redirecting to {unauthPath}"
+                    }
+                    applySessionLossRedirect(store)
+                }
+                result
+            }
+        }
+    }
+
+    private suspend fun publishStateChanged(store: KStore<TState>, routerState: RouterState) {
+        try {
+            store.dispatchAsync(Routing.StateChanged(routerState))
+        } catch (e: Exception) {
+            logger.error("Failed to dispatch StateChanged: ${e.message}")
+            throw e
         }
     }
 
@@ -284,7 +330,7 @@ class RouterMiddleware<TState: StateModel>(
             internalState.value = initialInternalState
             
             try {
-                store.dispatch(Routing.StateChanged(initialInternalState))
+                publishStateChanged(store, initialInternalState)
             } catch (e: Exception) {
                 logger.error("Failed to dispatch StateChanged: ${e.message}")
                 throw e
@@ -295,11 +341,11 @@ class RouterMiddleware<TState: StateModel>(
     private fun processRoutingAction(store: KStore<TState>, action: Routing, state: RouterState): RouterState {
         return when (action) {
             is Routing.NavigateTo -> handleNavigateTo(store, action, state)
-            is Routing.ReplaceContent -> handleReplaceContent(action, state)
+            is Routing.ReplaceContent -> handleReplaceContent(store, action, state)
             is Routing.GoBack -> handleGoBack(state)
             is Routing.PopToPath -> handlePopToPath(action, state)
             is Routing.ClearLayer -> handleClearLayer(action, state)
-            is Routing.ShowModal -> handleShowModal(action, state)
+            is Routing.ShowModal -> handleShowModal(store, action, state)
             is Routing.DismissModal -> handleDismissModal(action, state)
             is Routing.DeepLink -> handleDeepLink(store, action, state)
             is Routing.StateChanged -> state // No-op, just for notification
@@ -330,22 +376,21 @@ class RouterMiddleware<TState: StateModel>(
 
         // Check authentication
         if (route.requiresAuth && !authConfig.authChecker(store.state.value)) {
-            logger.info(path, authConfig.unauthenticatedRoute) { "Authentication required for route: {path}, redirecting to: {unauthPath}" }
-            authConfig.onAuthFailure?.invoke(store, route)
-            val authRoutes = findMatchingRoutes(authConfig.unauthenticatedRoute, state.deviceContext, store.state.value)
-            return authRoutes.firstOrNull()?.let { authRoute ->
-                navigateToRoute(authRoute, action.param, action.layer ?: authRoute.layer, state, action.clearHistory)
-            } ?: state
+            return redirectForAuthFailure(store, route, state, clearHistory = action.clearHistory)
         }
 
         logger.debug(route.path, route.layer) { "Successfully navigating to route: {routePath} on layer: {routeLayer}" }
         return navigateToRoute(route, action.param, action.layer ?: route.layer, state, action.clearHistory)
     }
 
-    private fun handleReplaceContent(action: Routing.ReplaceContent, state: RouterState): RouterState {
+    private fun handleReplaceContent(store: KStore<TState>, action: Routing.ReplaceContent, state: RouterState): RouterState {
         val path = normalizePath(action.path)
-        val matchingRoutes = findMatchingRoutes(path, state.deviceContext, storeReference?.state?.value)
+        val matchingRoutes = findMatchingRoutes(path, state.deviceContext, store.state.value)
         val route = matchingRoutes.firstOrNull() ?: return state
+
+        if (route.requiresAuth && !authConfig.authChecker(store.state.value)) {
+            return redirectForAuthFailure(store, route, state, clearHistory = false)
+        }
 
         return when (route.layer) {
             NavigationLayer.Content -> state.copy(
@@ -388,8 +433,9 @@ class RouterMiddleware<TState: StateModel>(
                 )
             }
             else -> {
+                // Already at root — leave state unchanged so lastRouteType is not a false "Back"
                 logger.debug { "Going back: no navigation possible, already at root" }
-                state.copy(lastRouteType = RouteType.Back)
+                state
             }
         }
     }
@@ -416,16 +462,20 @@ class RouterMiddleware<TState: StateModel>(
         }
     }
 
-    private fun handleShowModal(action: Routing.ShowModal, state: RouterState): RouterState {
+    private fun handleShowModal(store: KStore<TState>, action: Routing.ShowModal, state: RouterState): RouterState {
         val path = normalizePath(action.path)
         logger.debug(path, action.param) { "Showing modal: {path}, param: {param}" }
         
-        val matchingRoutes = findMatchingRoutes(path, state.deviceContext, storeReference?.state?.value)
+        val matchingRoutes = findMatchingRoutes(path, state.deviceContext, store.state.value)
         val route = matchingRoutes.firstOrNull { it.layer == NavigationLayer.Modal }
         
         if (route == null) {
             logger.warn(path) { "Modal route not found: {path}" }
             return state
+        }
+
+        if (route.requiresAuth && !authConfig.authChecker(store.state.value)) {
+            return redirectForAuthFailure(store, route, state, clearHistory = false)
         }
 
         return state.copy(
@@ -452,6 +502,74 @@ class RouterMiddleware<TState: StateModel>(
     private fun handleDeepLink(store: KStore<TState>, action: Routing.DeepLink, state: RouterState): RouterState {
         val path = parseDeepLink(action.url)
         return handleNavigateTo(store, Routing.NavigateTo(path), state)
+    }
+
+    private fun redirectForAuthFailure(
+        store: KStore<TState>,
+        route: Route<*>,
+        state: RouterState,
+        clearHistory: Boolean
+    ): RouterState {
+        logger.info(route.path, authConfig.unauthenticatedRoute) {
+            "Authentication required for route: {path}, redirecting to: {unauthPath}"
+        }
+        authConfig.onAuthFailure?.invoke(store, route)
+        val authRoutes = findMatchingRoutes(
+            normalizePath(authConfig.unauthenticatedRoute),
+            state.deviceContext,
+            store.state.value
+        )
+        // Always use the unauthenticated route's layer (not the protected route's layer)
+        return authRoutes.firstOrNull()?.let { authRoute ->
+            navigateToRoute(authRoute, param = null, authRoute.layer, state, clearHistory)
+        } ?: state
+    }
+
+    private fun hasProtectedRoutesActive(state: RouterState): Boolean {
+        val activePaths = state.getActiveRoutes().map { it.path }.toSet()
+        return routes.any { route ->
+            route.requiresAuth && route.path in activePaths
+        }
+    }
+
+    private suspend fun applySessionLossRedirect(store: KStore<TState>) {
+        val current = internalState.value
+        val unauthRoutes = findMatchingRoutes(
+            normalizePath(authConfig.unauthenticatedRoute),
+            current.deviceContext,
+            store.state.value
+        )
+        val unauth = unauthRoutes.firstOrNull()
+        if (unauth == null) {
+            logger.warn(authConfig.unauthenticatedRoute) {
+                "Session loss redirect failed; unauthenticated route not found: {path}"
+            }
+            return
+        }
+        val instance = createRouteInstance(unauth)
+        val enabledFeatures = evaluateFeatures(store.state.value)
+        val redirected = when (unauth.layer) {
+            NavigationLayer.Scene -> RouterState(
+                sceneRoutes = listOf(instance),
+                lastRouteType = RouteType.Scene,
+                deviceContext = current.deviceContext,
+                enabledFeatures = enabledFeatures
+            )
+            NavigationLayer.Content -> RouterState(
+                contentRoutes = listOf(instance),
+                lastRouteType = RouteType.Content,
+                deviceContext = current.deviceContext,
+                enabledFeatures = enabledFeatures
+            )
+            NavigationLayer.Modal -> RouterState(
+                modalRoutes = listOf(instance),
+                lastRouteType = RouteType.Modal,
+                deviceContext = current.deviceContext,
+                enabledFeatures = enabledFeatures
+            )
+        }
+        internalState.value = redirected
+        publishStateChanged(store, redirected)
     }
 
     private fun navigateToRoute(
@@ -552,15 +670,6 @@ class RouterMiddleware<TState: StateModel>(
                     false // Feature cannot be evaluated without evaluator and state
                 }
             }
-        }
-    }
-
-    private fun determineDeviceType(width: Int): DeviceClass {
-        return when {
-            width <= 320 -> DeviceClass.Watch  // Watch devices typically have very small screens
-            width < 600 -> DeviceClass.Phone
-            width < 1024 -> DeviceClass.Tablet
-            else -> DeviceClass.Desktop
         }
     }
     

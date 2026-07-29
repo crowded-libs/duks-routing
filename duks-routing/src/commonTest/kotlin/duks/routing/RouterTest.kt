@@ -1108,27 +1108,33 @@ private fun TestTagsModal() {}
 
     @Test
     fun `goBack should handle all navigation scenarios correctly`() = runTest {
+        lateinit var routerMiddleware: RouterMiddleware<TestAppState>
         val store = createStore(TestAppState()) {
             scope(backgroundScope)
-            
-            routing {
+
+            routerMiddleware = routing {
                 content("/home") { TestHomeScreen() }
                 content("/profile") { TestProfileScreen() }
                 modal("/compose") { TestComposeModal() }
             }
         }
-        
-        // Test basic goBack functionality - API exists and doesn't throw
+
         store.routeTo("/home")
-        
+        routerMiddleware.state.first { it.contentRoutes.any { r -> r.path == "/home" } }
+        store.routeTo("/profile")
+        routerMiddleware.state.first { it.contentRoutes.size >= 2 }
+
         store.goBack()
-        
-        // Test that goBack can be called multiple times without error
+        routerMiddleware.state.first {
+            it.contentRoutes.size == 1 && it.contentRoutes.single().path == "/home"
+        }
+
+        store.showModal("/compose")
+        routerMiddleware.state.first { it.modalRoutes.isNotEmpty() }
         store.goBack()
-        store.goBack()
-        
-        // Verify the API exists and is callable
-        assertTrue(true, "goBack function is available and callable without errors")
+        routerMiddleware.state.first { it.modalRoutes.isEmpty() }
+
+        assertEquals("/home", routerMiddleware.state.value.contentRoutes.single().path)
     }
 
     @Test
@@ -1184,6 +1190,8 @@ private fun TestTagsModal() {}
 
         assertEquals(1, routerMiddleware.state.value.contentRoutes.size)
         assertEquals("/home", routerMiddleware.state.value.contentRoutes.single().path)
+        // Root goBack must not synthesize a Back lastRouteType
+        assertTrue(routerMiddleware.state.value.lastRouteType != RouteType.Back)
     }
 
     @Test

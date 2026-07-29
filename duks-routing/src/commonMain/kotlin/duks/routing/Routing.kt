@@ -7,6 +7,10 @@ sealed class Routing : Action {
     data class NavigateTo(
         val path: String,
         val layer: NavigationLayer? = null,
+        @Deprecated(
+            message = "Unused; use clearHistory for stack reset. Will be removed in a future release.",
+            level = DeprecationLevel.WARNING
+        )
         val preserveNavigation: Boolean = true,
         val param: Any? = null,
         val clearHistory: Boolean = false

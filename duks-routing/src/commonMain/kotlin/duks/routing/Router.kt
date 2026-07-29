@@ -10,9 +10,11 @@ fun <TState: StateModel> KStore<TState>.routeTo(
     path: String,
     param: Any? = null,
     layer: NavigationLayer? = null,
+    @Suppress("DEPRECATION")
     preserveNavigation: Boolean = true,
     clearHistory: Boolean = false
 ) {
+    @Suppress("DEPRECATION")
     dispatch(Routing.NavigateTo(path, layer, preserveNavigation, param, clearHistory))
 }
 

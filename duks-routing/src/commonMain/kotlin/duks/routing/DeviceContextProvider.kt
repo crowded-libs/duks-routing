@@ -4,7 +4,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
-import androidx.compose.ui.unit.dp
 import duks.KStore
 import duks.StateModel
 
@@ -43,16 +42,11 @@ fun <TState: StateModel> DeviceContextProvider(
     val widthDp = with(density) { windowInfo.containerSize.width.toDp() }
     val heightDp = with(density) { windowInfo.containerSize.height.toDp() }
     
-    // Use smallest dimension to determine device type (consistent regardless of orientation)
-    // This is similar to Android's smallestScreenWidthDp
+    // Smallest dimension in dp (stable across orientation); shared breakpoints with middleware
     val smallestDimensionDp = minOf(widthDp, heightDp)
-    
-    // Calculate device type based on smallest dimension
-    val deviceType = when {
-        smallestDimensionDp < 600.dp -> DeviceClass.Phone
-        smallestDimensionDp < 900.dp -> DeviceClass.Tablet
-        else -> DeviceClass.Desktop
-    }
+    val deviceType = DeviceClassHeuristics.fromSmallestDimension(
+        smallestDimensionDp.value.toInt()
+    )
     
     // Get platform-specific context
     val platformContext = getPlatformContext()
