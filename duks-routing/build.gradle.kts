@@ -14,7 +14,7 @@ plugins {
 }
 
 group = "io.github.crowded-libs"
-version = "0.3.0"
+version = "0.3.1"
 
 kotlin {
     android {

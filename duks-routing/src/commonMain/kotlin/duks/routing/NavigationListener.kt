@@ -7,6 +7,9 @@ import duks.Action
  *
  * Invoked when [HasRouterState.routerState] changes (reducer-owned stacks). Safe to read
  * `store.state` for the updated app state when using async dispatch completion paths.
+ *
+ * Register at build time with [RouterBuilder.onNavigation], or later with
+ * [RouterMiddleware.addNavigationListener] (useful for analytics and other middleware).
  */
 fun interface NavigationListener {
     /**

@@ -15,11 +15,14 @@ import kotlinx.coroutines.flow.asStateFlow
  *
  * Stack mutations live in the auto-registered reducer ([RouterLogic.reduce]).
  * [state] mirrors [HasRouterState.routerState] from the store for convenience/tests.
+ *
+ * Listeners may be registered at build time via [RouterBuilder.onNavigation] or later with
+ * [addNavigationListener] (e.g. analytics middleware attaching after `routing { }`).
  */
 class RouterMiddleware<TState : HasRouterState>(
     internal val logic: RouterLogic<TState>,
     private val authConfig: AuthConfig<TState>,
-    private val navigationListeners: List<NavigationListener> = emptyList(),
+    navigationListeners: List<NavigationListener> = emptyList(),
     private val reevaluateFeaturesOnAppStateChange: Boolean = true
 ) : Middleware<TState>, StoreLifecycleAware<TState> {
     private val logger = Logger.default()
@@ -27,12 +30,35 @@ class RouterMiddleware<TState : HasRouterState>(
     private val mirror = MutableStateFlow(RouterState())
     val state: StateFlow<RouterState> = mirror.asStateFlow()
 
+    private val navigationListeners = navigationListeners.toMutableList()
+
     private var hasInitialized = false
     private var isRestorationInProgress = false
     private var storeReference: KStore<TState>? = null
     private var restorationCompleted = false
     private var pendingInitialRoute = false
     private var lastKnownAuthenticated: Boolean? = null
+
+    /**
+     * Register a [NavigationListener] after the router is built.
+     * Safe to call from store setup (e.g. analytics wiring after `routing { }`).
+     * Duplicate registration of the same instance is ignored.
+     */
+    fun addNavigationListener(listener: NavigationListener) {
+        if (listener !in navigationListeners) {
+            navigationListeners.add(listener)
+            logger.debug { "Added navigation listener" }
+        }
+    }
+
+    /**
+     * Unregister a listener previously added via [addNavigationListener] or [RouterBuilder.onNavigation].
+     */
+    fun removeNavigationListener(listener: NavigationListener) {
+        if (navigationListeners.remove(listener)) {
+            logger.debug { "Removed navigation listener" }
+        }
+    }
 
     override suspend fun onStoreCreated(store: KStore<TState>) {
         storeReference = store
@@ -163,7 +189,9 @@ class RouterMiddleware<TState : HasRouterState>(
     }
 
     private fun notifyListeners(previous: RouterState, current: RouterState, action: Action) {
-        navigationListeners.forEach { listener ->
+        // Snapshot so add/remove during a callback does not ConcurrentModificationException
+        val listeners = navigationListeners.toList()
+        listeners.forEach { listener ->
             try {
                 listener.onRouterStateChanged(previous, current, action)
             } catch (e: Exception) {

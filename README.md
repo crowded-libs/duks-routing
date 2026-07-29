@@ -14,7 +14,7 @@ Requires **duks 0.4.0**. Targets: JVM, Android, iOS, wasmJs.
 
 ```kotlin
 dependencies {
-    implementation("io.github.crowded-libs:duks-routing:0.3.0")
+    implementation("io.github.crowded-libs:duks-routing:0.3.1")
 }
 ```
 
@@ -245,6 +245,14 @@ routing {
 ```
 
 Called after the store has committed a new `routerState`.
+
+Register later (e.g. analytics middleware after `routing { }`) via the returned middleware:
+
+```kotlin
+val router = routing { /* routes */ }
+router.addNavigationListener { previous, current, action -> /* … */ }
+router.removeNavigationListener(listener)
+```
 
 ## Middleware order (duks)
 
