@@ -15,8 +15,11 @@ class FeatureToggleRoutingTest {
     data class TestAppState(
         val isAuthenticated: Boolean = false,
         val userRole: String = "user",
-        val enabledFeatures: Set<String> = emptySet()
-    ) : StateModel
+        val enabledFeatures: Set<String> = emptySet(),
+        override val routerState: RouterState = RouterState()
+    ) : StateModel, HasRouterState {
+        override fun withRouterState(routerState: RouterState) = copy(routerState = routerState)
+    }
     
     data class UpdateFeaturesAction(val features: Set<String>) : Action
     data class SetRoleAction(val role: String) : Action

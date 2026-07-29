@@ -3,61 +3,42 @@ package duks.routing
 import duks.*
 import duks.logging.Logger
 import duks.logging.debug
+import duks.logging.error
 import duks.logging.info
-import duks.logging.warn
-import duks.routing.features.FeatureToggleEvaluator
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * Router middleware: authoritative [state] plus [Routing.StateChanged] publish for [HasRouterState].
+ * Policy middleware for routing: auth callbacks, restore rehydration, initial route,
+ * session-loss redirects, feature sync, and navigation listeners.
  *
- * **Sync contract:** every mutation of [state] goes through [commitRouterState], which
- * `dispatchAsync`s [Routing.StateChanged] so app reducers can mirror into [HasRouterState.routerState].
- * Feature flags are re-evaluated when non-routing actions change app state (when an evaluator is set).
+ * Stack mutations live in the auto-registered reducer ([RouterLogic.reduce]).
+ * [state] mirrors [HasRouterState.routerState] from the store for convenience/tests.
  */
-class RouterMiddleware<TState: StateModel>(
+class RouterMiddleware<TState : HasRouterState>(
+    internal val logic: RouterLogic<TState>,
     private val authConfig: AuthConfig<TState>,
-    private val routes: List<Route<*>>,
-    private val fallbackRoute: String = "/404",
-    private val initialRoute: String? = null,
-    private val restorationStrategy: RestorationStrategy = RestorationStrategy.RestoreAll,
-    private val featureToggleEvaluator: FeatureToggleEvaluator? = null,
-    private val paramRegistry: RouteParamRegistry = RouteParamRegistry.Default,
     private val navigationListeners: List<NavigationListener> = emptyList(),
     private val reevaluateFeaturesOnAppStateChange: Boolean = true
 ) : Middleware<TState>, StoreLifecycleAware<TState> {
     private val logger = Logger.default()
-    
-    // Private mutable state — authoritative; mirrored via Routing.StateChanged
-    private val internalState = MutableStateFlow(RouterState())
-    private var hasInitialized = false
 
-    // Public read-only access to router state
-    val state: StateFlow<RouterState> = internalState.asStateFlow()
-    
-    // Track if storage restoration is in progress
+    private val mirror = MutableStateFlow(RouterState())
+    val state: StateFlow<RouterState> = mirror.asStateFlow()
+
+    private var hasInitialized = false
     private var isRestorationInProgress = false
     private var storeReference: KStore<TState>? = null
-    // Track if restoration has completed (regardless of whether state was restored)
     private var restorationCompleted = false
-    // Track if we need to apply initial route after getting store reference
     private var pendingInitialRoute = false
-    // Last observed auth result for session-loss revalidation
     private var lastKnownAuthenticated: Boolean? = null
-    
-    // Collect all unique features from routes for evaluation
-    private val routeFeatures: Set<String> = routes
-        .mapNotNull { it.requiredFeature }
-        .toSet()
-    
+
     override suspend fun onStoreCreated(store: KStore<TState>) {
-        // Store reference for later use
         storeReference = store
         lastKnownAuthenticated = authConfig.authChecker(store.state.value)
-        
-        // Check if we have a pending initial route (restoration completed before onStoreCreated)
+        mirror.value = store.state.value.routerState
+
         if (pendingInitialRoute && !hasInitialized) {
             applyInitialRoute(store)
             hasInitialized = true
@@ -75,21 +56,17 @@ class RouterMiddleware<TState: StateModel>(
         restorationCompleted = false
         pendingInitialRoute = false
         lastKnownAuthenticated = null
-        internalState.value = RouterState()
+        mirror.value = RouterState()
     }
-    
+
     override suspend fun onStorageRestorationStarted() {
-        // Mark that restoration is starting
         isRestorationInProgress = true
     }
-    
+
     override suspend fun onStorageRestorationCompleted(restored: Boolean) {
-        // Mark restoration as complete
         isRestorationInProgress = false
         restorationCompleted = true
-        
-        // Only apply initial route if no state was restored (empty storage)
-        // If state was restored, RestoreStateAction will handle initialization
+
         if (!restored && !hasInitialized) {
             if (storeReference != null) {
                 applyInitialRoute(storeReference!!)
@@ -100,831 +77,116 @@ class RouterMiddleware<TState: StateModel>(
         }
     }
 
-    override suspend fun invoke(store: KStore<TState>, next: suspend (Action) -> Action, action: Action): Action {
-        return when (action) {
-            is Routing -> {
-                if (action is Routing.StateChanged) {
-                    // StateChanged actions are just passed through - don't process them again
-                    next(action)
-                } else {
-                    val currentState = internalState.value
-                    val newState = processRoutingAction(store, action, currentState)
+    override suspend fun invoke(
+        store: KStore<TState>,
+        next: suspend (Action) -> Action,
+        action: Action
+    ): Action {
+        val previousRouter = store.state.value.routerState
 
-                    if (newState != currentState) {
-                        logger.debug(action::class.simpleName) { "Router state changing due to action: {actionType}" }
-                        
-                        val enabledFeatures = evaluateFeatures(store.state.value)
-                        val stateWithFeatures = newState.copy(enabledFeatures = enabledFeatures)
-
-                        // Pass the original action through first, then commit + StateChanged
-                        val result = next(action)
-                        commitRouterState(store, currentState, stateWithFeatures, action)
-                        result
-                    } else {
-                        next(action)
-                    }
+        // Auth failure side effect (stack rewrite happens in the reducer)
+        when (action) {
+            is Routing.NavigateTo, is Routing.ShowModal, is Routing.ReplaceContent -> {
+                logic.routeBlockedByAuth(action, store.state.value, previousRouter)?.let { route ->
+                    authConfig.onAuthFailure?.invoke(store, route)
                 }
-            }
-            is DeviceAction -> {
-                val currentState = internalState.value
-                val newState = when (action) {
-                    is DeviceAction.UpdateDeviceContext -> {
-                        logger.debug(action.context.deviceType, action.context.screenWidth, action.context.screenHeight) { "Updating device context: {deviceType}, {screenWidth}x{screenHeight}" }
-                        currentState.copy(deviceContext = action.context)
-                    }
-                    is DeviceAction.UpdateScreenSize -> {
-                        val deviceType = DeviceClassHeuristics.fromDimensions(action.width, action.height)
-                        logger.debug(action.width, action.height, deviceType) { "Updating screen size: {width}x{height}, detected device type: {deviceType}" }
-                        
-                        val context = currentState.deviceContext ?: DeviceContext(
-                            screenWidth = action.width,
-                            screenHeight = action.height,
-                            orientation = if (action.width > action.height) ScreenOrientation.Landscape else ScreenOrientation.Portrait,
-                            deviceType = deviceType
-                        )
-                        currentState.copy(
-                            deviceContext = context.copy(
-                                screenWidth = action.width,
-                                screenHeight = action.height,
-                                orientation = if (action.width > action.height) ScreenOrientation.Landscape else ScreenOrientation.Portrait,
-                                deviceType = deviceType
-                            )
-                        )
-                    }
-                    is DeviceAction.UpdateOrientation -> {
-                        logger.debug(action.orientation) { "Updating device orientation: {orientation}" }
-                        val context = currentState.deviceContext
-                        if (context != null) {
-                            currentState.copy(
-                                deviceContext = context.copy(orientation = action.orientation)
-                            )
-                        } else {
-                            currentState
-                        }
-                    }
-                }
-                
-                val stateWithFeatures = newState.copy(
-                    enabledFeatures = evaluateFeatures(store.state.value)
-                )
-                val result = next(action)
-                if (stateWithFeatures != currentState) {
-                    commitRouterState(store, currentState, stateWithFeatures, action)
-                }
-                result
-            }
-            is RestoreStateAction<*> -> {
-                @Suppress("UNCHECKED_CAST") 
-                val restoreAction = action as RestoreStateAction<TState>
-                val restoredState = restoreAction.state
-                
-                // Extract router state if the state implements HasRouterState
-                val routerState = when (restoredState) {
-                    is HasRouterState -> {
-                        restoredState.routerState
-                    }
-                    else -> {
-                        null
-                    }
-                }
-                
-                // Restore router state using the restoration logic
-                val restoredInternalState = if (routerState != null) {
-                    restoreFromRouterState(
-                        routerState = routerState,
-                        availableRoutes = routes,
-                        strategy = restorationStrategy,
-                        currentState = restoredState
-                    )
-                } else {
-                    // No router state - check if we should apply conditional defaults
-                    if (restorationStrategy is RestorationStrategy.RestoreWithDefaults<*>) {
-                        @Suppress("UNCHECKED_CAST")
-                        val defaults = restorationStrategy.conditionalDefaults as ConditionalDefaultsConfig<TState>
-                        applyConditionalDefaults(defaults, restoredState, routes)
-                    } else {
-                        null
-                    }
-                }
-                
-                // Pass the action through first so app reducer can process it
-                val result = next(action)
-                
-                if (restoredInternalState != null) {
-                    // Log restoration details
-                    val restoredPaths = buildString {
-                        if (restoredInternalState.sceneRoutes.isNotEmpty()) {
-                            append("scenes: ${restoredInternalState.sceneRoutes.map { it.path }}")
-                        }
-                        if (restoredInternalState.contentRoutes.isNotEmpty()) {
-                            if (this.isNotEmpty()) append(", ")
-                            append("content: ${restoredInternalState.contentRoutes.map { it.path }}")
-                        }
-                        if (restoredInternalState.modalRoutes.isNotEmpty()) {
-                            if (this.isNotEmpty()) append(", ")
-                            append("modals: ${restoredInternalState.modalRoutes.map { it.path }}")
-                        }
-                    }
-                    
-                    logger.info(
-                        restoredInternalState.contentRoutes.size,
-                        restoredInternalState.modalRoutes.size,
-                        restoredInternalState.sceneRoutes.size
-                    ) { "Router state restored with {contentCount} content routes, {modalCount} modals, {sceneCount} scenes" }
-                    
-                    if (restoredPaths.isNotEmpty()) {
-                        logger.debug(restoredPaths) { "Restored routes: {routes}" }
-                    }
-                    
-                    val enabledFeatures = evaluateFeatures(restoredState)
-                    val stateWithFeatures = restoredInternalState.copy(enabledFeatures = enabledFeatures)
-                    hasInitialized = true
-                    lastKnownAuthenticated = authConfig.authChecker(restoredState)
-                    // After RestoreStateAction so app gets live RouteInstances, not wire format only
-                    commitRouterState(store, internalState.value, stateWithFeatures, action)
-                } else {
-                    if (!hasRoutes(internalState.value)) {
-                        applyInitialRoute(store)
-                        hasInitialized = true
-                    }
-                }
-                
-                result
-            }
-            else -> {
-                val wasAuthenticated = lastKnownAuthenticated
-                    ?: authConfig.authChecker(store.state.value)
-                val result = next(action)
-                val isAuthenticated = authConfig.authChecker(store.state.value)
-                lastKnownAuthenticated = isAuthenticated
-
-                if (authConfig.revalidateOnSessionLoss &&
-                    wasAuthenticated &&
-                    !isAuthenticated &&
-                    hasProtectedRoutesActive(internalState.value)
-                ) {
-                    logger.info(authConfig.unauthenticatedRoute) {
-                        "Session loss detected with protected routes active; redirecting to {unauthPath}"
-                    }
-                    applySessionLossRedirect(store, action)
-                } else if (reevaluateFeaturesOnAppStateChange) {
-                    refreshEnabledFeaturesIfChanged(store, action)
-                }
-                result
             }
         }
+
+        val actionToProcess = when (action) {
+            is RestoreStateAction<*> -> {
+                @Suppress("UNCHECKED_CAST")
+                val restoreAction = action as RestoreStateAction<TState>
+                val restored = restoreAction.state
+                val live = logic.rehydrateFromAppState(restored)
+                    ?: logic.buildInitialRouterState(restored)
+                if (live != null) {
+                    @Suppress("UNCHECKED_CAST")
+                    val fixed = restored.withRouterState(live) as TState
+                    hasInitialized = true
+                    lastKnownAuthenticated = authConfig.authChecker(fixed)
+                    logger.info(
+                        live.contentRoutes.size,
+                        live.modalRoutes.size,
+                        live.sceneRoutes.size
+                    ) {
+                        "Router state restored with {contentCount} content routes, {modalCount} modals, {sceneCount} scenes"
+                    }
+                    RestoreStateAction(fixed)
+                } else {
+                    action
+                }
+            }
+            else -> action
+        }
+
+        val result = next(actionToProcess)
+        mirror.value = store.state.value.routerState
+
+        val currentRouter = store.state.value.routerState
+        if (previousRouter != currentRouter) {
+            notifyListeners(previousRouter, currentRouter, action)
+        }
+
+        // Session loss after domain reducers ran
+        if (action !is Routing && action !is DeviceAction && action !is RestoreStateAction<*>) {
+            val wasAuthenticated = lastKnownAuthenticated
+                ?: authConfig.authChecker(store.state.value)
+            val isAuthenticated = authConfig.authChecker(store.state.value)
+            lastKnownAuthenticated = isAuthenticated
+
+            if (authConfig.revalidateOnSessionLoss &&
+                wasAuthenticated &&
+                !isAuthenticated &&
+                logic.hasProtectedRoutesActive(store.state.value.routerState)
+            ) {
+                logger.info(authConfig.unauthenticatedRoute) {
+                    "Session loss detected with protected routes active; redirecting to {unauthPath}"
+                }
+                val before = store.state.value.routerState
+                store.dispatchAsync(logic.unauthenticatedNavigateAction())
+                mirror.value = store.state.value.routerState
+                if (before != store.state.value.routerState) {
+                    notifyListeners(before, store.state.value.routerState, action)
+                }
+            } else if (logic.featuresNeedSync(store.state.value)) {
+                val before = store.state.value.routerState
+                store.dispatchAsync(Routing.SyncFeatures)
+                mirror.value = store.state.value.routerState
+                if (before != store.state.value.routerState) {
+                    notifyListeners(before, store.state.value.routerState, action)
+                }
+            }
+        }
+
+        return result
     }
 
-    /**
-     * Single write path for router mutations: update [state], publish [Routing.StateChanged],
-     * then notify [navigationListeners].
-     */
-    private suspend fun commitRouterState(
-        store: KStore<TState>,
-        previous: RouterState,
-        next: RouterState,
-        causingAction: Action
-    ) {
-        if (previous == next) return
-        internalState.value = next
-        try {
-            store.dispatchAsync(Routing.StateChanged(next))
-        } catch (e: Exception) {
-            logger.error("Failed to dispatch StateChanged: ${e.message}")
-            throw e
-        }
+    private fun notifyListeners(previous: RouterState, current: RouterState, action: Action) {
         navigationListeners.forEach { listener ->
             try {
-                listener.onRouterStateChanged(previous, next, causingAction)
+                listener.onRouterStateChanged(previous, current, action)
             } catch (e: Exception) {
                 logger.error("NavigationListener failed: ${e.message}")
             }
         }
     }
 
-    private suspend fun refreshEnabledFeaturesIfChanged(store: KStore<TState>, action: Action) {
-        if (featureToggleEvaluator == null) return
-        val previous = internalState.value
-        val enabled = evaluateFeatures(store.state.value)
-        if (enabled == previous.enabledFeatures) return
-        logger.debug { "Feature flags changed after app action; refreshing RouterState.enabledFeatures" }
-        commitRouterState(store, previous, previous.copy(enabledFeatures = enabled), action)
-    }
-
-    private fun findInitialRoute(): Route<*>? {
-        
-        // Use the explicitly set initial route if provided
-        initialRoute?.let { path ->
-            val normalizedPath = normalizePath(path)
-            
-            val contentRoute = routes.find { it.path == normalizedPath && it.layer == NavigationLayer.Content }
-            if (contentRoute != null) {
-                return contentRoute
-            }
-            
-            val anyRoute = routes.find { it.path == normalizedPath }
-            if (anyRoute != null) {
-                return anyRoute
-            }
-            
-        }
-        
-        // Only use "/" as default initial route, don't auto-select other routes
-        return routes.find { it.path == "/" && it.layer == NavigationLayer.Content }
-            ?: routes.find { it.path == "/" }
-    }
-    
     private suspend fun applyInitialRoute(store: KStore<TState>) {
-        val initialRoute = findInitialRoute()
-        if (initialRoute != null) {
-            logger.debug(initialRoute.path) { "Applying initial route: {path}" }
-            
-            val instance = createRouteInstance(initialRoute)
-            val enabledFeatures = evaluateFeatures(store.state.value)
-            val initialInternalState = when (initialRoute.layer) {
-                NavigationLayer.Scene -> RouterState(sceneRoutes = listOf(instance), lastRouteType = RouteType.Scene, enabledFeatures = enabledFeatures)
-                NavigationLayer.Content -> RouterState(contentRoutes = listOf(instance), lastRouteType = RouteType.Content, enabledFeatures = enabledFeatures)
-                NavigationLayer.Modal -> RouterState(modalRoutes = listOf(instance), lastRouteType = RouteType.Modal, enabledFeatures = enabledFeatures)
-            }
-            commitRouterState(
-                store,
-                internalState.value,
-                initialInternalState,
-                Routing.NavigateTo(initialRoute.path)
-            )
+        if (hasRoutes(store.state.value.routerState)) return
+        val initial = logic.findInitialRoute() ?: return
+        logger.debug(initial.path) { "Applying initial route: {path}" }
+        val before = store.state.value.routerState
+        store.dispatchAsync(Routing.NavigateTo(path = initial.path, layer = initial.layer))
+        mirror.value = store.state.value.routerState
+        hasInitialized = true
+        if (before != store.state.value.routerState) {
+            notifyListeners(before, store.state.value.routerState, Routing.NavigateTo(initial.path))
         }
     }
 
-    private fun processRoutingAction(store: KStore<TState>, action: Routing, state: RouterState): RouterState {
-        return when (action) {
-            is Routing.NavigateTo -> handleNavigateTo(store, action, state)
-            is Routing.ReplaceContent -> handleReplaceContent(store, action, state)
-            is Routing.GoBack -> handleGoBack(state)
-            is Routing.PopToPath -> handlePopToPath(action, state)
-            is Routing.ClearLayer -> handleClearLayer(action, state)
-            is Routing.ShowModal -> handleShowModal(store, action, state)
-            is Routing.DismissModal -> handleDismissModal(action, state)
-            is Routing.DeepLink -> handleDeepLink(store, action, state)
-            is Routing.StateChanged -> state // No-op, just for notification
-        }
-    }
-
-    private fun handleNavigateTo(store: KStore<TState>, action: Routing.NavigateTo, state: RouterState): RouterState {
-        val path = normalizePath(action.path)
-        logger.debug(path, action.layer ?: "auto", action.param) { "Navigating to: {path}, layer: {layer}, param: {param}" }
-        
-        val matching = findMatchingRoutesWithParams(path, state.deviceContext, store.state.value)
-        
-        // If layer is specified, filter by it
-        val matched = if (action.layer != null) {
-            matching.firstOrNull { it.route.layer == action.layer }
-        } else {
-            matching.firstOrNull()
-        }
-
-        val mode = resolveNavigationMode(action)
-
-        if (matched == null) {
-            logger.warn(path, fallbackRoute) { "Route not found: {path}, attempting fallback to: {fallbackRoute}" }
-            // Try fallback
-            val fallbackRoutes = findMatchingRoutesWithParams(fallbackRoute, state.deviceContext, store.state.value)
-            return fallbackRoutes.firstOrNull()?.let { fallback ->
-                navigateToRoute(fallback.route, action.param, action.layer ?: fallback.route.layer, state, mode)
-            } ?: state
-        }
-
-        val route = matched.route
-        val effectiveParam = action.param ?: matched.pathMatch.inferredParam()
-
-        // Check authentication
-        if (route.requiresAuth && !authConfig.authChecker(store.state.value)) {
-            return redirectForAuthFailure(
-                store,
-                route,
-                state,
-                mode = if (mode == NavigationMode.ClearHistory) mode else NavigationMode.Push
-            )
-        }
-
-        logger.debug(route.path, route.layer, mode) { "Successfully navigating to route: {routePath} on layer: {routeLayer} mode={mode}" }
-        return navigateToRoute(route, effectiveParam, action.layer ?: route.layer, state, mode)
-    }
-
-    private fun resolveNavigationMode(action: Routing.NavigateTo): NavigationMode =
-        if (action.clearHistory) NavigationMode.ClearHistory else action.mode
-
-    private fun handleReplaceContent(store: KStore<TState>, action: Routing.ReplaceContent, state: RouterState): RouterState {
-        val path = normalizePath(action.path)
-        val matched = findMatchingRoutesWithParams(path, state.deviceContext, store.state.value).firstOrNull()
-            ?: return state
-        val route = matched.route
-        val effectiveParam = action.param ?: matched.pathMatch.inferredParam()
-
-        if (route.requiresAuth && !authConfig.authChecker(store.state.value)) {
-            return redirectForAuthFailure(store, route, state)
-        }
-
-        return when (route.layer) {
-            NavigationLayer.Content -> state.copy(
-                contentRoutes = listOf(createRouteInstance(route, effectiveParam)),
-                modalRoutes = emptyList(),
-                lastRouteType = RouteType.Content
-            )
-            else -> state
-        }
-    }
-
-    private fun handleGoBack(state: RouterState): RouterState {
-        return when {
-            state.modalRoutes.isNotEmpty() -> {
-                logger.debug { "Going back: dismissing modal" }
-                state.copy(
-                    modalRoutes = state.modalRoutes.dropLast(1),
-                    lastRouteType = RouteType.Back
-                )
-            }
-            // Pop content when stacked, or when a single content overlay sits on a scene
-            // (scene + content detail). A lone content root with no scene is preserved.
-            state.contentRoutes.size > 1 ||
-                (state.contentRoutes.isNotEmpty() && state.sceneRoutes.isNotEmpty()) -> {
-                val fromPath = state.contentRoutes.last().path
-                val remaining = state.contentRoutes.dropLast(1)
-                val toPath = remaining.lastOrNull()?.path
-                    ?: state.sceneRoutes.lastOrNull()?.path
-                    ?: "(empty)"
-                logger.debug(fromPath, toPath) { "Going back: from {fromPath} to {toPath}" }
-                state.copy(
-                    contentRoutes = remaining,
-                    lastRouteType = RouteType.Back
-                )
-            }
-            state.sceneRoutes.size > 1 -> {
-                logger.debug(state.sceneRoutes.last().path, state.sceneRoutes[state.sceneRoutes.size - 2].path) { "Going back: from scene {fromPath} to {toPath}" }
-                state.copy(
-                    sceneRoutes = state.sceneRoutes.dropLast(1),
-                    lastRouteType = RouteType.Back
-                )
-            }
-            else -> {
-                // Already at root — leave state unchanged so lastRouteType is not a false "Back"
-                logger.debug { "Going back: no navigation possible, already at root" }
-                state
-            }
-        }
-    }
-
-    private fun handlePopToPath(action: Routing.PopToPath, state: RouterState): RouterState {
-        val path = normalizePath(action.path)
-
-        // Prefer the uppermost layer that still contains the path (modals → content → scene)
-        val modalIndex = state.modalRoutes.indexOfLast { it.path == path }
-        if (modalIndex >= 0) {
-            return state.copy(
-                modalRoutes = state.modalRoutes.take(modalIndex + 1),
-                lastRouteType = RouteType.Back
-            )
-        }
-
-        val contentIndex = state.contentRoutes.indexOfLast { it.path == path }
-        if (contentIndex >= 0) {
-            return state.copy(
-                contentRoutes = state.contentRoutes.take(contentIndex + 1),
-                modalRoutes = emptyList(),
-                lastRouteType = RouteType.Back
-            )
-        }
-
-        val sceneIndex = state.sceneRoutes.indexOfLast { it.path == path }
-        if (sceneIndex >= 0) {
-            return state.copy(
-                sceneRoutes = state.sceneRoutes.take(sceneIndex + 1),
-                contentRoutes = emptyList(),
-                modalRoutes = emptyList(),
-                lastRouteType = RouteType.Back
-            )
-        }
-
-        return state
-    }
-
-    private fun handleClearLayer(action: Routing.ClearLayer, state: RouterState): RouterState {
-        return when (action.layer) {
-            NavigationLayer.Scene -> state.copy(sceneRoutes = emptyList())
-            NavigationLayer.Content -> state.copy(contentRoutes = emptyList())
-            NavigationLayer.Modal -> state.copy(modalRoutes = emptyList())
-        }
-    }
-
-    private fun handleShowModal(store: KStore<TState>, action: Routing.ShowModal, state: RouterState): RouterState {
-        val path = normalizePath(action.path)
-        logger.debug(path, action.param) { "Showing modal: {path}, param: {param}" }
-        
-        val matched = findMatchingRoutesWithParams(path, state.deviceContext, store.state.value)
-            .firstOrNull { it.route.layer == NavigationLayer.Modal }
-        
-        if (matched == null) {
-            logger.warn(path) { "Modal route not found: {path}" }
-            return state
-        }
-
-        val route = matched.route
-        val effectiveParam = action.param ?: matched.pathMatch.inferredParam()
-
-        if (route.requiresAuth && !authConfig.authChecker(store.state.value)) {
-            return redirectForAuthFailure(store, route, state)
-        }
-
-        return state.copy(
-            modalRoutes = state.modalRoutes + createRouteInstance(route, effectiveParam),
-            lastRouteType = RouteType.Modal
-        )
-    }
-
-    private fun handleDismissModal(action: Routing.DismissModal, state: RouterState): RouterState {
-        return if (action.path != null) {
-            val path = normalizePath(action.path)
-            state.copy(
-                modalRoutes = state.modalRoutes.filter { it.path != path },
-                lastRouteType = RouteType.Back
-            )
-        } else {
-            state.copy(
-                modalRoutes = state.modalRoutes.dropLast(1),
-                lastRouteType = RouteType.Back
-            )
-        }
-    }
-
-    private fun handleDeepLink(store: KStore<TState>, action: Routing.DeepLink, state: RouterState): RouterState {
-        val parsed = parseDeepLink(action.url)
-        logger.debug(parsed.path, parsed.scheme, parsed.host) {
-            "Deep link parsed path={path} scheme={scheme} host={host}"
-        }
-        // Explicit param null so path templates / single-segment params can fill in
-        return handleNavigateTo(store, Routing.NavigateTo(path = parsed.path), state)
-    }
-
-    private fun redirectForAuthFailure(
-        store: KStore<TState>,
-        route: Route<*>,
-        state: RouterState,
-        mode: NavigationMode = NavigationMode.Push
-    ): RouterState {
-        logger.info(route.path, authConfig.unauthenticatedRoute) {
-            "Authentication required for route: {path}, redirecting to: {unauthPath}"
-        }
-        authConfig.onAuthFailure?.invoke(store, route)
-        val authRoutes = findMatchingRoutesWithParams(
-            normalizePath(authConfig.unauthenticatedRoute),
-            state.deviceContext,
-            store.state.value
-        )
-        // Always use the unauthenticated route's layer (not the protected route's layer)
-        return authRoutes.firstOrNull()?.let { matched ->
-            navigateToRoute(matched.route, param = null, matched.route.layer, state, mode)
-        } ?: state
-    }
-
-    private fun hasProtectedRoutesActive(state: RouterState): Boolean {
-        val activePaths = state.getActiveRoutes().map { it.path }.toSet()
-        return routes.any { route ->
-            route.requiresAuth && route.path in activePaths
-        }
-    }
-
-    private suspend fun applySessionLossRedirect(store: KStore<TState>, causingAction: Action) {
-        val current = internalState.value
-        val unauthRoutes = findMatchingRoutesWithParams(
-            normalizePath(authConfig.unauthenticatedRoute),
-            current.deviceContext,
-            store.state.value
-        )
-        val unauth = unauthRoutes.firstOrNull()?.route
-        if (unauth == null) {
-            logger.warn(authConfig.unauthenticatedRoute) {
-                "Session loss redirect failed; unauthenticated route not found: {path}"
-            }
-            return
-        }
-        val instance = createRouteInstance(unauth)
-        val enabledFeatures = evaluateFeatures(store.state.value)
-        val redirected = when (unauth.layer) {
-            NavigationLayer.Scene -> RouterState(
-                sceneRoutes = listOf(instance),
-                lastRouteType = RouteType.Scene,
-                deviceContext = current.deviceContext,
-                enabledFeatures = enabledFeatures
-            )
-            NavigationLayer.Content -> RouterState(
-                contentRoutes = listOf(instance),
-                lastRouteType = RouteType.Content,
-                deviceContext = current.deviceContext,
-                enabledFeatures = enabledFeatures
-            )
-            NavigationLayer.Modal -> RouterState(
-                modalRoutes = listOf(instance),
-                lastRouteType = RouteType.Modal,
-                deviceContext = current.deviceContext,
-                enabledFeatures = enabledFeatures
-            )
-        }
-        commitRouterState(store, current, redirected, causingAction)
-    }
-
-    private fun navigateToRoute(
-        route: Route<*>,
-        param: Any?,
-        layer: NavigationLayer,
-        state: RouterState,
-        mode: NavigationMode = NavigationMode.Push
-    ): RouterState {
-        val instance = createRouteInstance(route, param)
-
-        return when (mode) {
-            NavigationMode.ClearHistory -> when (layer) {
-                NavigationLayer.Scene -> state.copy(
-                    sceneRoutes = listOf(instance),
-                    contentRoutes = emptyList(),
-                    modalRoutes = emptyList(),
-                    lastRouteType = RouteType.Scene
-                )
-                NavigationLayer.Content -> state.copy(
-                    sceneRoutes = emptyList(),
-                    contentRoutes = listOf(instance),
-                    modalRoutes = emptyList(),
-                    lastRouteType = RouteType.Content
-                )
-                NavigationLayer.Modal -> state.copy(
-                    sceneRoutes = emptyList(),
-                    contentRoutes = emptyList(),
-                    modalRoutes = listOf(instance),
-                    lastRouteType = RouteType.Modal
-                )
-            }
-
-            NavigationMode.ReplaceLayer -> when (layer) {
-                // Tab roots: single scene, drop overlays
-                NavigationLayer.Scene -> state.copy(
-                    sceneRoutes = listOf(instance),
-                    contentRoutes = emptyList(),
-                    modalRoutes = emptyList(),
-                    lastRouteType = RouteType.Scene
-                )
-                // Detail root on content: keep scenes, drop modals
-                NavigationLayer.Content -> state.copy(
-                    contentRoutes = listOf(instance),
-                    modalRoutes = emptyList(),
-                    lastRouteType = RouteType.Content
-                )
-                NavigationLayer.Modal -> state.copy(
-                    modalRoutes = listOf(instance),
-                    lastRouteType = RouteType.Modal
-                )
-            }
-
-            NavigationMode.SingleTop -> when (layer) {
-                NavigationLayer.Scene -> {
-                    val scenes = if (state.sceneRoutes.lastOrNull()?.path == instance.path) {
-                        state.sceneRoutes.dropLast(1) + instance
-                    } else {
-                        state.sceneRoutes + instance
-                    }
-                    state.copy(
-                        sceneRoutes = scenes,
-                        contentRoutes = emptyList(),
-                        modalRoutes = emptyList(),
-                        lastRouteType = RouteType.Scene
-                    )
-                }
-                NavigationLayer.Content -> {
-                    val contents = if (state.contentRoutes.lastOrNull()?.path == instance.path) {
-                        state.contentRoutes.dropLast(1) + instance
-                    } else {
-                        state.contentRoutes + instance
-                    }
-                    state.copy(
-                        contentRoutes = contents,
-                        lastRouteType = RouteType.Content
-                    )
-                }
-                NavigationLayer.Modal -> {
-                    val modals = if (state.modalRoutes.lastOrNull()?.path == instance.path) {
-                        state.modalRoutes.dropLast(1) + instance
-                    } else {
-                        state.modalRoutes + instance
-                    }
-                    state.copy(
-                        modalRoutes = modals,
-                        lastRouteType = RouteType.Modal
-                    )
-                }
-            }
-
-            NavigationMode.Push -> when (layer) {
-                NavigationLayer.Scene -> state.copy(
-                    sceneRoutes = state.sceneRoutes + instance,
-                    contentRoutes = emptyList(),
-                    modalRoutes = emptyList(),
-                    lastRouteType = RouteType.Scene
-                )
-                NavigationLayer.Content -> state.copy(
-                    contentRoutes = state.contentRoutes + instance,
-                    lastRouteType = RouteType.Content
-                )
-                NavigationLayer.Modal -> state.copy(
-                    modalRoutes = state.modalRoutes + instance,
-                    lastRouteType = RouteType.Modal
-                )
-            }
-        }
-    }
-
-    private data class MatchedRoute(
-        val route: Route<*>,
-        val pathMatch: PathMatch
-    )
-
-    private fun findMatchingRoutesWithParams(
-        path: String,
-        deviceContext: DeviceContext?,
-        appState: TState? = null
-    ): List<MatchedRoute> {
-        return routes.mapNotNull { route ->
-            val pathMatch = matchPath(route.path, path) ?: return@mapNotNull null
-
-            if (route.requiredFeature != null && featureToggleEvaluator != null && appState != null) {
-                if (!featureToggleEvaluator.isFeatureEnabled(appState, route.requiredFeature)) {
-                    return@mapNotNull null
-                }
-            }
-
-            if (deviceContext != null && route.renderConditions.isNotEmpty()) {
-                val ok = route.renderConditions.all { condition ->
-                    evaluateCondition(condition, deviceContext, appState)
-                }
-                if (!ok) return@mapNotNull null
-            }
-
-            MatchedRoute(route, pathMatch)
-        }
-    }
-
-    private fun evaluateCondition(condition: RenderCondition, context: DeviceContext, appState: TState? = null): Boolean {
-        return when (condition) {
-            is RenderCondition.ScreenSize -> {
-                (condition.minWidth == null || context.screenWidth >= condition.minWidth) &&
-                (condition.maxWidth == null || context.screenWidth <= condition.maxWidth)
-            }
-            is RenderCondition.Orientation -> context.orientation == condition.orientation
-            is RenderCondition.DeviceType -> context.deviceType in condition.types
-            is RenderCondition.Custom -> condition.check(context)
-            is RenderCondition.Composite -> when (condition.operator) {
-                CompositeOperator.AND -> condition.conditions.all { evaluateCondition(it, context, appState) }
-                CompositeOperator.OR -> condition.conditions.any { evaluateCondition(it, context, appState) }
-            }
-            is RenderCondition.FeatureEnabled -> {
-                if (featureToggleEvaluator != null && appState != null) {
-                    featureToggleEvaluator.isFeatureEnabled(appState, condition.featureName)
-                } else {
-                    false // Feature cannot be evaluated without evaluator and state
-                }
-            }
-        }
-    }
-    
-    private fun <TState: StateModel> restoreFromRouterState(
-        routerState: RouterState,
-        availableRoutes: List<Route<*>>,
-        strategy: RestorationStrategy,
-        currentState: TState? = null
-    ): RouterState? {
-        // Use the RouterRestoration logic to handle restoration strategy
-        val filteredRouterState = RouterRestoration.applyRestorationStrategy(
-            routerState = routerState,
-            strategy = strategy,
-            currentState = currentState
-        )
-        
-        // Convert serializable routes back to actual RouteInstances (with decoded params)
-        val routeMap = availableRoutes.associateBy { it.path }
-
-        fun rehydrate(list: List<RouteInstance>): List<RouteInstance> =
-            list.mapNotNull { instance ->
-                val decoded = when (instance) {
-                    is SerializableRouteInstance -> instance.withDecodedParam(paramRegistry)
-                    else -> instance
-                }
-                routeMap[decoded.path]?.let { route ->
-                    createRouteInstance(route, decoded.param)
-                }
-            }
-
-        val sceneRoutes = rehydrate(filteredRouterState.sceneRoutes)
-        val contentRoutes = rehydrate(filteredRouterState.contentRoutes)
-        val modalRoutes = rehydrate(filteredRouterState.modalRoutes)
-
-        val rehydrated = RouterState(
-            sceneRoutes = sceneRoutes,
-            contentRoutes = contentRoutes,
-            modalRoutes = modalRoutes,
-            deviceContext = filteredRouterState.deviceContext,
-            lastRouteType = filteredRouterState.lastRouteType
-        )
-
-        // Conditional defaults — mode decides whether they override rehydrated stacks
-        if (strategy is RestorationStrategy.RestoreWithDefaults<*>) {
-            @Suppress("UNCHECKED_CAST")
-            val defaults = strategy.conditionalDefaults as ConditionalDefaultsConfig<TState>
-            if (currentState != null && shouldApplyConditionalDefaults(defaults, rehydrated, availableRoutes)) {
-                val conditionalRouterState = applyConditionalDefaults(defaults, currentState, availableRoutes)
-                if (conditionalRouterState != null) {
-                    return conditionalRouterState
-                }
-            }
-        }
-
-        return rehydrated
-    }
-
-    private fun <TState: StateModel> shouldApplyConditionalDefaults(
-        config: ConditionalDefaultsConfig<TState>,
-        restored: RouterState,
-        availableRoutes: List<Route<*>>
-    ): Boolean {
-        return when (config.mode) {
-            ConditionalDefaultsMode.OverrideAlways -> true
-            ConditionalDefaultsMode.OnlyIfEmpty -> !hasRoutes(restored)
-            ConditionalDefaultsMode.OnlyIfInvalid -> {
-                if (!hasRoutes(restored)) return true
-                val known = availableRoutes.map { it.path }.toSet()
-                restored.getActiveRoutes().any { it.path !in known }
-            }
-        }
-    }
-    
-    private fun hasRoutes(routerState: RouterState): Boolean {
-        return routerState.sceneRoutes.isNotEmpty() || 
-               routerState.contentRoutes.isNotEmpty() || 
-               routerState.modalRoutes.isNotEmpty()
-    }
-    
-    private fun evaluateFeatures(appState: TState): Set<String> {
-        if (featureToggleEvaluator == null) return emptySet()
-        
-        return routeFeatures.filter { feature ->
-            featureToggleEvaluator.isFeatureEnabled(appState, feature)
-        }.toSet()
-    }
-    
-    private fun <TState: StateModel> applyConditionalDefaults(
-        config: ConditionalDefaultsConfig<TState>,
-        currentState: TState,
-        routes: List<Route<*>>
-    ): RouterState? {
-        // Find the first matching condition
-        val matchingDefault = config.defaults.firstOrNull { default ->
-            try {
-                default.condition(currentState)
-            } catch (e: Exception) {
-                logger.error("Error evaluating conditional default: ${e.message ?: "Unknown error"}")
-                false
-            }
-        }
-        
-        val routePath = matchingDefault?.route ?: config.fallbackRoute
-        if (routePath == null) {
-            logger.debug("No matching conditional defaults or fallback, continuing with restored routes")
-            return null
-        }
-        
-        logger.info("Applying conditional default route: $routePath (overriding restored routes)")
-        
-        // Find the route in available routes
-        val route = routes.find { it.path == routePath }
-        if (route == null) {
-            logger.warn("Conditional default route not found: $routePath")
-            return null
-        }
-        
-        // Create route instance based on layer
-        val routeInstance = createRouteInstance(route)
-        return when (route.layer) {
-            NavigationLayer.Scene -> RouterState(
-                sceneRoutes = listOf(routeInstance),
-                lastRouteType = RouteType.Scene
-            )
-            NavigationLayer.Content -> RouterState(
-                contentRoutes = listOf(routeInstance),
-                lastRouteType = RouteType.Content
-            )
-            NavigationLayer.Modal -> RouterState(
-                modalRoutes = listOf(routeInstance),
-                lastRouteType = RouteType.Modal
-            )
-        }
-    }
-}
-
-internal fun normalizePath(path: String): String {
-    return "/" + path.trim('/').split('/').filter { it.isNotEmpty() }.joinToString("/")
+    private fun hasRoutes(routerState: RouterState): Boolean =
+        routerState.sceneRoutes.isNotEmpty() ||
+            routerState.contentRoutes.isNotEmpty() ||
+            routerState.modalRoutes.isNotEmpty()
 }

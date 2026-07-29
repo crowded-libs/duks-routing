@@ -17,15 +17,16 @@ class RouterPhase4Test {
     data class TestAppState(
         val features: Set<String> = emptySet(),
         override val routerState: RouterState = RouterState()
-    ) : StateModel, HasRouterState
+    ) : StateModel, HasRouterState {
+        override fun withRouterState(routerState: RouterState) = copy(routerState = routerState)
+    }
 
     data class SetFeatures(val features: Set<String>) : Action
 
     private fun reduce(state: TestAppState, action: Action): TestAppState {
-        val withRouter = state.applyRouterStateChanged(action) { copy(routerState = it) }
         return when (action) {
-            is SetFeatures -> withRouter.copy(features = action.features)
-            else -> withRouter
+            is SetFeatures -> state.copy(features = action.features)
+            else -> state
         }
     }
 
@@ -36,17 +37,12 @@ class RouterPhase4Test {
     }
 
     @Test
-    fun `applyRouterStateChanged updates only on StateChanged`() {
+    fun `withRouterState replaces router slice`() {
         val state = TestAppState()
         val next = RouterState(contentRoutes = listOf(SerializableRouteInstance("/home")))
-        val updated = state.applyRouterStateChanged(Routing.StateChanged(next)) {
-            copy(routerState = it)
-        }
+        val updated = state.withRouterState(next)
         assertEquals("/home", updated.routerState.contentRoutes.single().path)
-        val unchanged = state.applyRouterStateChanged(SetFeatures(setOf("x"))) {
-            copy(routerState = it)
-        }
-        assertTrue(unchanged.routerState.contentRoutes.isEmpty())
+        assertTrue(state.routerState.contentRoutes.isEmpty())
     }
 
     @Test
@@ -72,7 +68,7 @@ class RouterPhase4Test {
     }
 
     @Test
-    fun `navigation listener fires after StateChanged is applied`() = runTest {
+    fun `navigation listener fires after router state is committed`() = runTest {
         val events = mutableListOf<Triple<String?, String?, String?>>()
         lateinit var router: RouterMiddleware<TestAppState>
         val store = createStore(TestAppState()) {

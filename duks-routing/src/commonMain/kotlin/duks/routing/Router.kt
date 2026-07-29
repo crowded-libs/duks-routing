@@ -10,17 +10,13 @@ fun <TState: StateModel> KStore<TState>.routeTo(
     path: String,
     param: Any? = null,
     layer: NavigationLayer? = null,
-    @Suppress("DEPRECATION")
-    preserveNavigation: Boolean = true,
     clearHistory: Boolean = false,
     mode: NavigationMode = NavigationMode.Push
 ) {
-    @Suppress("DEPRECATION")
     dispatch(
         Routing.NavigateTo(
             path = path,
             layer = layer,
-            preserveNavigation = preserveNavigation,
             param = param,
             clearHistory = clearHistory,
             mode = mode
@@ -54,7 +50,7 @@ fun <TState: StateModel> KStore<TState>.popToRoute(path: String) {
 }
 
 // DSL for building routes
-class RouterBuilder<TState: StateModel> {
+class RouterBuilder<TState : HasRouterState> {
     private val logger = Logger.default()
     private val routes = mutableListOf<Route<*>>()
     private var initialRoutePath: String? = null
@@ -282,7 +278,7 @@ class RouterBuilder<TState: StateModel> {
     }
 
     /**
-     * Observe committed router transitions (after [Routing.StateChanged] is published).
+     * Observe committed router transitions after the store has updated [HasRouterState.routerState].
      * Useful for analytics / screen tracking.
      */
     fun onNavigation(listener: NavigationListener) {
@@ -306,7 +302,7 @@ class RouterBuilder<TState: StateModel> {
 }
 
 // Route group builder
-class RouteGroupBuilder<T, TState: StateModel>(
+class RouteGroupBuilder<T, TState : HasRouterState>(
     val routerBuilder: RouterBuilder<TState>,
     val pathPrefix: String?,
     val groupRequiresAuth: Boolean,
@@ -462,8 +458,13 @@ class RouteGroupBuilder<T, TState: StateModel>(
     }
 }
 
-// Extension function for StoreBuilder
-fun <TState: StateModel> StoreBuilder<TState>.routing(
+/**
+ * Register routing middleware **and** an automatic reducer that owns [HasRouterState.routerState].
+ *
+ * Apps implement [HasRouterState.withRouterState]; they do not need to handle routing actions
+ * in their own reducer.
+ */
+fun <TState : HasRouterState> StoreBuilder<TState>.routing(
     authConfig: AuthConfig<TState> = AuthConfig({ true }),
     fallbackRoute: String = "/404",
     routes: RouterBuilder<TState>.() -> Unit
@@ -471,23 +472,27 @@ fun <TState: StateModel> StoreBuilder<TState>.routing(
     val builder = RouterBuilder<TState>()
     builder.apply(routes)
     val routeList = builder.build()
-    val initialRoute = builder.getInitialRoute()
-    val restorationStrategy = builder.getRestorationStrategy()
-    val featureToggleEvaluator = builder.getFeatureToggleEvaluator()
-    val paramRegistry = builder.resolveParamRegistry()
-    
-    val routerMiddleware = RouterMiddleware(
+    val logic = RouterLogic(
         authConfig = authConfig,
         routes = routeList,
         fallbackRoute = fallbackRoute,
-        initialRoute = initialRoute,
-        restorationStrategy = restorationStrategy,
-        featureToggleEvaluator = featureToggleEvaluator,
-        paramRegistry = paramRegistry,
+        initialRoutePath = builder.getInitialRoute(),
+        restorationStrategy = builder.getRestorationStrategy(),
+        featureToggleEvaluator = builder.getFeatureToggleEvaluator(),
+        paramRegistry = builder.resolveParamRegistry(),
+        reevaluateFeaturesOnAppStateChange = builder.resolveReevaluateFeaturesOnAppStateChange()
+    )
+
+    val routerMiddleware = RouterMiddleware(
+        logic = logic,
+        authConfig = authConfig,
         navigationListeners = builder.resolveNavigationListeners(),
         reevaluateFeaturesOnAppStateChange = builder.resolveReevaluateFeaturesOnAppStateChange()
     )
-    
+
+    // Auto-wire pure router reducer (runs with other reduceWith registrations)
+    reduceWith { state, action -> logic.reduce(state, action) }
+
     middleware {
         middleware(routerMiddleware)
         lifecycleAware(routerMiddleware)

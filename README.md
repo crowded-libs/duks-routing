@@ -1,6 +1,6 @@
-# Duks Routing
+# duks-routing
 
-A Kotlin Multiplatform routing library with advanced features for managing navigation in compose-based applications.
+Kotlin Multiplatform routing for Compose apps built on [duks](https://github.com/crowded-libs/duks).
 
 [![Build](https://github.com/crowded-libs/duks-routing/actions/workflows/build.yml/badge.svg)](https://github.com/crowded-libs/duks-routing/actions/workflows/build.yml)
 [![Kotlin](https://img.shields.io/badge/kotlin-2.4.10-blue.svg?logo=kotlin)](http://kotlinlang.org)
@@ -8,347 +8,248 @@ A Kotlin Multiplatform routing library with advanced features for managing navig
 [![Maven Central](https://img.shields.io/maven-central/v/io.github.crowded-libs/duks-routing.svg?label=Maven%20Central)](https://search.maven.org/search?q=g:%22io.github.crowded-libs%22%20AND%20a:%22duks-routing%22)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
+Requires **duks 0.4.0**. Targets: JVM, Android, iOS, wasmJs.
 
-## Features
-
-- 🎯 **Multi-layer Navigation**: Support for scenes, content, and modal layers
-- 🔒 **Authentication Support**: Built-in route protection with auth requirements
-- 📱 **Responsive Design**: Device-aware routing with render conditions
-- 💾 **State Restoration**: Automatic state persistence and restoration
-- 🎛️ **Feature Toggles**: Advanced feature flagging for both conditional view rendering and components within
-- 🧩 **Type-safe Parameters**: Pass typed parameters between routes
-
-## Installation
+## Install
 
 ```kotlin
 dependencies {
-    implementation("io.github.crowded-libs:duks-routing:0.2.1")
+    implementation("io.github.crowded-libs:duks-routing:0.3.0")
 }
 ```
 
-## Quick Start
+## How it works
+
+1. App state implements `HasRouterState` and `withRouterState`.
+2. `StoreBuilder.routing { }` registers **middleware** and a **router reducer**.
+3. Navigation actions (`routeTo`, `goBack`, …) update `state.routerState` through that reducer.
+4. UI reads `store.state` / `routerState` (or `RouterMiddleware.state`, which mirrors the same stack).
+
+Domain reducers should not handle routing actions.
+
+## Quick start
 
 ```kotlin
-// Define your app state
 @Serializable
 data class AppState(
     val user: User? = null,
     override val routerState: RouterState = RouterState()
-) : HasRouterState
-
-// Create your store with routing
-val store = createStore<AppState>(AppState()) {
-    routing {
-        // Set initial route
-        initialRoute("/home")
-        
-        // Define routes
-        content("/home") {
-            HomeScreen()
-        }
-        
-        content("/profile", requiresAuth = true) {
-            ProfileScreen()
-        }
-        
-        modal("/settings") {
-            SettingsModal()
-        }
-    }
-}
-```
-
-## Navigation Layers
-
-The library supports three distinct navigation layers:
-
-### Scene Routes
-Full screen replacements, typically for major navigation changes:
-```kotlin
-scene("/onboarding") {
-    OnboardingFlow()
-}
-```
-
-### Content Routes  
-Standard navigation within the main content area:
-```kotlin
-content("/products") {
-    ProductListScreen()
-}
-```
-
-### Modal Routes
-Overlay content that appears above the current screen:
-```kotlin
-modal("/filter") {
-    FilterModal()
-}
-```
-
-## Authentication
-
-Protect routes with authentication requirements:
-
-```kotlin
-routing(
-    authConfig = AuthConfig(
-        authChecker = { state -> state.user != null },
-        unauthenticatedRoute = "/login"
-    )
-) {
-    content("/profile", requiresAuth = true) {
-        ProfileScreen()
-    }
-}
-```
-
-## Responsive Routing
-
-Define different routes based on device characteristics:
-
-```kotlin
-content("/dashboard") {
-    whenCondition = RenderCondition.DeviceType(setOf(DeviceClass.Desktop, DeviceClass.Tablet))
-    DesktopDashboard()
+) : HasRouterState {
+    override fun withRouterState(routerState: RouterState) = copy(routerState = routerState)
 }
 
-content("/dashboard") {
-    whenCondition = RenderCondition.DeviceType(setOf(DeviceClass.Phone))
-    MobileDashboard()
-}
-```
-
-## Feature Toggles
-
-The routing library includes a powerful feature toggle system that enables:
-- Different routes for different user types (e.g., premium vs free users)
-- A/B testing with feature flags
-- Remote configuration support
-- Preview-friendly API design
-
-### Setting Up Feature Toggles
-
-1. **Implement a Feature Evaluator**:
-```kotlin
-class AppFeatureEvaluator : FeatureToggleEvaluator {
-    override fun <TState : StateModel> isFeatureEnabled(
-        state: TState, 
-        featureName: String
-    ): Boolean {
-        val appState = state as AppState
-        
-        // Check remote config first
-        appState.remoteFeatures[featureName]?.let { return it }
-        
-        // Local feature logic
-        return when (featureName) {
-            "premium_user" -> appState.user?.isPremium == true
-            "beta_features" -> appState.user?.isBetaTester == true
-            else -> false
-        }
-    }
-}
-```
-
-2. **Configure Feature-Based Routes**:
-```kotlin
-routing {
-    // Configure evaluator
-    featureToggles(AppFeatureEvaluator())
-    
-    // Premium users see ad-free experience
-    scene("/movies", requiredFeature = "premium_user") {
-        PremiumMoviesScreen()
-    }
-    
-    // Free users see ads
-    scene("/movies", requiredFeature = "free_tier") {
-        MoviesWithAdsScreen()
-    }
-}
-```
-
-3. **Use Feature Checks in UI**:
-```kotlin
-// Direct state access
-if (state.isFeatureEnabled("premium_features")) {
-    ShowPremiumContent()
-}
-
-// In composables with FeatureGate
-@Composable
-fun MovieScreen(store: KStore<AppState>) {
-    FeatureGate(store, "download_feature") {
-        DownloadButton()
-    }
-    
-    // With fallback
-    FeatureGate(
-        store = store,
-        featureName = "hd_streaming",
-        fallback = { StandardPlayer() }
+val store = createStore(AppState()) {
+    routing(
+        authConfig = AuthConfig(
+            authChecker = { it.user != null },
+            unauthenticatedRoute = "/login"
+        )
     ) {
-        HDPlayer()
+        initialRoute("/home")
+        content("/home") { HomeScreen() }
+        content("/login") { LoginScreen() }
+        content("/profile", requiresAuth = true) { ProfileScreen() }
+        modal("/settings") { SettingsModal() }
     }
+    reduceWith(::appReduce)
 }
 ```
 
-### Feature Toggle Benefits
-
-- **Preview-Friendly**: No composition locals needed, works great with Compose previews
-- **Type-Safe**: Full Kotlin type safety with compile-time checks
-- **Performance**: Features used by routes are cached on `RouterState` and refreshed on routing and device updates
-- **Flexible**: Supports any evaluation logic including remote config, user properties, or experiments
-
-## State Restoration
-
-Configure how router state is restored:
+Render the current route, for example:
 
 ```kotlin
-routing {
-    restoration {
-        // Restore all routes (default)
-        restoreAll()
+val route by store.state.mapToPropsAsState { routerState.primaryRoute() }
+route?.Content()
+```
 
-        // Or restore only selected route types
-        restoreOnly(RouteType.Scene, RouteType.Content)
+Use `DeviceContextProvider(store) { … }` so device-based `RenderCondition`s receive size/orientation updates.
 
-        // Conditional defaults — mode controls when they replace restored stacks
-        conditionalDefaults(mode = ConditionalDefaultsMode.OnlyIfEmpty) {
-            `when` { state -> state.user == null } then "/login"
-            `when` { state -> state.user?.isOnboarded == true } then "/home"
-            otherwise("/onboarding")
-        }
-    }
+## Layers
 
-    // Optional: custom param codecs (String/Int/… are built-in)
-    // registerParamSerializer<MyId>()
+| Layer | DSL | Behavior |
+|---|---|---|
+| Scene | `scene(path) { }` | Full-screen stack. Navigating to a scene clears content and modal stacks. |
+| Content | `content(path) { }` | Content stack (e.g. main chrome). |
+| Modal | `modal(path) { }` | Overlay stack. |
+
+Optional `config` on a route is available as `RouteInstance.config` / `RouterState.primaryConfig<T>()`.
+
+Groups share auth/config/prefix:
+
+```kotlin
+group(requiresAuth = true, config = ScaffoldConfig(showBack = true)) {
+    content("/account") { AccountScreen() }
+    content("/billing") { BillingScreen() }
 }
 ```
 
-| Conditional mode | Behavior |
-|---|---|
-| `OverrideAlways` (default) | Matching default always replaces restored routes |
-| `OnlyIfEmpty` | Defaults only when the restored stack is empty |
-| `OnlyIfInvalid` | Defaults when empty or restored paths are unknown |
-
-Apps that implement `HasRouterState` should copy `Routing.StateChanged` into their root state:
+## Navigation
 
 ```kotlin
-is Routing.StateChanged -> state.copy(routerState = action.routerState)
-```
-
-### Serializable route parameters
-
-Primitive params (`String`, `Int`, `Long`, `Boolean`, `Float`, `Double`) round-trip through
-`RouterState` JSON automatically. Register other `@Serializable` types:
-
-```kotlin
-RouteParamRegistry.Default.register<ProductId>()
-// or inside routing { registerParamSerializer<ProductId>() }
-```
-
-Unregistered / non-serializable params keep the path on disk but drop the param value.
-
-### Path templates and deep links
-
-```kotlin
-content("/item/{id}") { /* routeParam<String>() */ }
-
-store.routeTo("/item/42")                 // param = "42"
-store.dispatch(Routing.DeepLink("myapp://host/item/42?src=push"))
-```
-
-## Navigation Actions
-
-```kotlin
-// Navigate to a route
 store.routeTo("/products")
-
-// Navigate with parameters
-store.routeTo("/product/details", param = Product(id = "123"))
-
-// Reset stacks while navigating (e.g. after logout)
-store.routeTo("/login", clearHistory = true)
-// equivalent:
-store.routeTo("/login", mode = NavigationMode.ClearHistory)
-
-// Tab-style scene switch: single scene root, clear content + modals
-store.switchScene("/home")
-// equivalent:
-store.routeTo("/home", layer = NavigationLayer.Scene, mode = NavigationMode.ReplaceLayer)
-
-// Single-top on the target layer (replace top if same path, else push)
+store.routeTo("/product", param = productId)
+store.routeTo("/login", clearHistory = true)          // same as mode = ClearHistory
 store.routeTo("/item", param = id, mode = NavigationMode.SingleTop)
-
-// Go back (no-op at root; does not flip lastRouteType)
-store.goBack()
-
-// Show modal
-store.showModal("/filter", param = FilterOptions())
-
-// Dismiss modal
+store.switchScene("/home")                             // scene ReplaceLayer; clears content + modals
+store.goBack()                                         // no-op at root; does not set lastRouteType
+store.showModal("/filter", param = options)
 store.dismissModal()
-
-// Pop to a path in modal, content, or scene stacks (clears higher overlays)
-store.popToRoute("/home")
+store.popToRoute("/home")                              // modal → content → scene
+store.dispatch(Routing.DeepLink("myapp://host/item/42"))
 ```
 
 ### Navigation modes
 
 | Mode | Behavior |
 |---|---|
-| `Push` (default) | Append on the target layer. Scene pushes still clear content + modals. |
-| `SingleTop` | If the top of the target layer already matches the path, replace it; otherwise push. |
-| `ReplaceLayer` | Replace only that layer’s stack. Scenes also clear content + modals (tab roots). Content clears modals and keeps scenes. |
-| `ClearHistory` | Clear all layers and open the destination alone. |
+| `Push` (default) | Append on the target layer. Scene still clears content + modals. |
+| `SingleTop` | If the top of that layer has the same path, replace it; otherwise push. |
+| `ReplaceLayer` | Replace that layer only. Scene also clears content + modals. Content clears modals and keeps scenes. |
+| `ClearHistory` | Clear all layers; destination alone. |
 
-### Reading router state
-
-```kotlin
-val primary = routerState.primaryRoute()   // content overlay, else scene
-val canBack = routerState.canGoBack()
-val titleConfig = routerState.primaryConfig<ScaffoldConfig>()
-if (route.pathEquals("/home")) { /* tab selected */ }
-```
-
-### Auth session loss
-
-When `AuthConfig.revalidateOnSessionLoss` is true (default), a transition from authenticated
-to unauthenticated while protected routes are active clears the stack and navigates to
-`unauthenticatedRoute`.
-
-### Dual-state contract
-
-The middleware owns the live stack ([`RouterMiddleware.state`](RouterMiddleware)) and publishes
-`Routing.StateChanged` after every mutation. Apps that implement `HasRouterState` must copy that
-into root state:
+### Router state helpers
 
 ```kotlin
-is Routing.StateChanged -> state.copy(routerState = action.routerState)
-// or helper:
-else -> state.applyRouterStateChanged(action) { copy(routerState = it) }
+routerState.primaryRoute()     // last content, else last scene
+routerState.canGoBack()
+routerState.primaryConfig<MyConfig>()
+route.pathEquals("/home")      // normalized path equality
 ```
 
-### Feature re-evaluation
+### Auth
 
-With `featureToggles(evaluator)`, `RouterState.enabledFeatures` refreshes on routing/device updates
-**and** after other app actions when flags may have changed (default). Disable with:
+- `requiresAuth = true` on a route: unauthenticated navigation is redirected to `AuthConfig.unauthenticatedRoute` (that route’s layer).
+- `onAuthFailure` is invoked when a protected route is blocked.
+- `revalidateOnSessionLoss` (default `true`): if auth goes true → false while protected routes are active, navigates to the unauthenticated route with history cleared.
+
+## Path templates and params
 
 ```kotlin
-featureToggles(evaluator, reevaluateOnAppStateChange = false)
+content("/item/{id}") {
+    val id = routeParam<String>()
+    ItemScreen(id)
+}
+
+store.routeTo("/item/42")  // param = "42"
 ```
 
-### Navigation listeners (analytics)
+Multiple path segments become a `Map<String, String>` when no explicit `param` is passed.
+
+Typed DSL:
+
+```kotlin
+content<String>("/item/{id}") { id -> ItemScreen(id) }
+modal<FilterOptions>("/filter") { options -> FilterModal(options) }
+```
+
+## Persistence of params
+
+When `RouterState` is serialized (e.g. with app state), params are encoded if a codec exists:
+
+- Built-in: `String`, `Int`, `Long`, `Boolean`, `Float`, `Double`
+- Custom: register a `@Serializable` type
+
+```kotlin
+routing {
+    registerParamSerializer<ProductId>()
+    // …
+}
+// or: RouteParamRegistry.Default.register<ProductId>()
+```
+
+Unregistered / non-serializable params: path is kept, param is dropped on serialize.
+
+## Restoration
+
+With duks persistence, restored `routerState` is rehydrated against the route table (paths → live `Route` content). Configure in the DSL:
+
+```kotlin
+routing {
+    restoration {
+        restoreAll()  // default base
+        // restoreOnly(RouteType.Scene, RouteType.Content)
+        // restoreSpecific { scenes("/home"); content("/list") }
+
+        conditionalDefaults(mode = ConditionalDefaultsMode.OnlyIfEmpty) {
+            `when` { it.user == null } then "/login"
+            `when` { it.user?.isOnboarded == true } then "/home"
+            otherwise("/onboarding")
+        }
+    }
+}
+```
+
+| Mode | When defaults apply |
+|---|---|
+| `OverrideAlways` (default) | Matching condition (or `otherwise`) replaces restored stacks |
+| `OnlyIfEmpty` | Only if the restored stack is empty |
+| `OnlyIfInvalid` | If empty, or any restored path is not a registered route |
+
+## Device conditions
+
+```kotlin
+content(
+    "/dashboard",
+    whenCondition = RenderCondition.DeviceType(setOf(DeviceClass.Desktop, DeviceClass.Tablet))
+) {
+    DesktopDashboard()
+}
+
+content(
+    "/dashboard",
+    whenCondition = RenderCondition.DeviceType(setOf(DeviceClass.Phone))
+) {
+    MobileDashboard()
+}
+```
+
+Also: `RenderCondition.ScreenSize`, `Orientation`, `Custom`, `FeatureEnabled`, and `and` / `or`.
+
+Device class breakpoints (smallest edge, prefer dp): watch ≤320, phone &lt;600, tablet &lt;900, else desktop — see `DeviceClassHeuristics`.
+
+## Feature toggles
+
+Implement `FeatureToggleEvaluator` and pass it to `featureToggles(...)`. Routes can require a feature:
+
+```kotlin
+routing {
+    featureToggles(AppFeatureEvaluator())  // reevaluateOnAppStateChange = true by default
+
+    content("/beta", requiredFeature = "beta_access") {
+        BetaScreen()
+    }
+}
+```
+
+`RouterState.enabledFeatures` is the set of feature names declared as `requiredFeature` on routes that currently evaluate to true. It is updated on navigation/device changes and, by default, after other actions when that set would change.
+
+UI helpers (they read `enabledFeatures`, so the feature name must appear as some route’s `requiredFeature` if you rely on the cache):
+
+```kotlin
+if (state.isFeatureEnabled("beta_access")) { /* … */ }
+
+FeatureGate(store, "beta_access", fallback = { LockedScreen() }) {
+    BetaScreen()
+}
+```
+
+## Navigation listeners
 
 ```kotlin
 routing {
     onNavigation { previous, current, action ->
-        analytics.screen(current.primaryRoute()?.path)
+        // analytics, logging
     }
     // routes…
 }
 ```
 
-Listeners run after `StateChanged` is applied, so `store.state` already mirrors the new routes.
+Called after the store has committed a new `routerState`.
+
+## Middleware order (duks)
+
+Recommended order matches duks docs: exception handling → logging/cache → **persistence** → **routing** → sagas → async. Call `routing { }` so it sits with domain middleware after persistence.
+
+## License
+
+Apache 2.0

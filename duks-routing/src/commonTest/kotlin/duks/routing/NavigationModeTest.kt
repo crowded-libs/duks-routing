@@ -13,10 +13,11 @@ class NavigationModeTest {
 
     data class TestAppState(
         override val routerState: RouterState = RouterState()
-    ) : StateModel, HasRouterState
+    ) : StateModel, HasRouterState {
+        override fun withRouterState(routerState: RouterState) = copy(routerState = routerState)
+    }
 
     private fun reduce(state: TestAppState, action: Action): TestAppState = when (action) {
-        is Routing.StateChanged -> state.copy(routerState = action.routerState)
         else -> state
     }
 

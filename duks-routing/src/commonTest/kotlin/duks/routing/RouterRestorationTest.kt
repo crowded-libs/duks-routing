@@ -422,7 +422,7 @@ class RouterRestorationTest {
         store.showModal("/alert")
         
         // Wait for state to be updated by waiting for the expected state
-        // The middleware processes actions and then dispatches StateChanged
+        // Restore rehydrates route instances; the auto reducer owns subsequent stack updates
         // We need to wait for the final state
         val finalState = store.state.first { state ->
             state.routerState.contentRoutes.size == 2 && 
@@ -475,12 +475,13 @@ data class TestAppState(
     val userName: String = "",
     val isLoggedIn: Boolean = false,
     override val routerState: RouterState = RouterState()
-) : StateModel, HasRouterState
+) : StateModel, HasRouterState {
+    override fun withRouterState(routerState: RouterState) = copy(routerState = routerState)
+}
 
 // Test reducer that updates routing state
 val testAppReducer: Reducer<TestAppState> = { state, action ->
     when (action) {
-        is Routing.StateChanged -> state.copy(routerState = action.routerState)
         else -> state
     }
 }

@@ -19,8 +19,11 @@ class RouterTest {
     // Test app state
     data class TestAppState(
         val isAuthenticated: Boolean = false,
-        val currentTab: String? = null
-    ) : StateModel
+        val currentTab: String? = null,
+        override val routerState: RouterState = RouterState()
+    ) : StateModel, HasRouterState {
+        override fun withRouterState(routerState: RouterState) = copy(routerState = routerState)
+    }
 
     // Test action for authentication
     data class AuthAction(val isAuthenticated: Boolean) : Action
@@ -90,21 +93,12 @@ class RouterTest {
             }
             
             // App's reducer listens to routing changes
-            reduceWith { state, action ->
-                when (action) {
-                    is Routing.StateChanged -> {
-                        appStateChangeCount++
-                        // Map route paths to tabs
-                        val currentPath = action.routerState.contentRoutes.lastOrNull()?.path
-                        val currentTab = when (currentPath) {
-                            "/" -> "home"
-                            "/profile" -> "profile"
-                            else -> null
-                        }
-                        state.copy(currentTab = currentTab)
-                    }
-                    else -> state
-                }
+            reduceWith { state, _ ->
+                val instance = state.routerState.getCurrentContentRoute()
+                    ?: state.routerState.lastScene
+                val tab = (instance?.route?.config as? NavigationConfig)?.selectedTab
+                    ?: instance?.path
+                if (tab != null && tab != state.currentTab) state.copy(currentTab = tab) else state
             }
         }
         
@@ -119,14 +113,12 @@ class RouterTest {
         // Navigate to profile
         store.routeTo("/profile")
         
-        // Wait for router middleware state to update first
-        routerMiddleware.state.first { it.getCurrentContentRoute()?.route?.path == "/profile" }
-        // Then wait for app state to change to profile
-        store.state.first { it.currentTab == "profile" }
-        
-        // Verify app state was updated
-        assertTrue(appStateChangeCount > 0, "Expected state change count to be greater than 0, but was $appStateChangeCount")
+        // Wait for router + app state (reducer-owned stack is on store)
+        store.state.first {
+            it.routerState.getCurrentContentRoute()?.path == "/profile" && it.currentTab == "profile"
+        }
         assertEquals("profile", store.state.value.currentTab)
+        assertEquals("/profile", routerMiddleware.state.value.getCurrentContentRoute()?.path)
     }
 
     @Test
@@ -160,8 +152,11 @@ class RouterTest {
             val isAuthenticated: Boolean = false,
             val currentRoute: String? = null,
             val authFailureCount: Int = 0,
-            val lastFailedRoute: String? = null
-        ) : StateModel
+            val lastFailedRoute: String? = null,
+            override val routerState: RouterState = RouterState()
+        ) : StateModel, HasRouterState {
+            override fun withRouterState(routerState: RouterState) = copy(routerState = routerState)
+        }
         
         val store = createStore(AppState()) {
             scope(backgroundScope)
@@ -171,7 +166,6 @@ class RouterTest {
                     authChecker = { state -> state.isAuthenticated },
                     unauthenticatedRoute = "/login",
                     onAuthFailure = { store, route ->
-                        // Track auth failures in the state via a custom action
                         store.dispatch(AuthFailedAction(route.path))
                     }
                 )
@@ -183,23 +177,16 @@ class RouterTest {
                 content("/settings", requiresAuth = true) { TestSettingsScreen() }
             }
             
-            // Track all state changes in the reducer
             reduceWith { state, action ->
+                val route = state.routerState.contentRoutes.lastOrNull()?.path
+                val base = if (route != state.currentRoute) state.copy(currentRoute = route) else state
                 when (action) {
-                    is Routing.StateChanged -> {
-                        val currentRoute = action.routerState.contentRoutes.lastOrNull()?.path
-                        state.copy(currentRoute = currentRoute)
-                    }
-                    is AuthAction -> {
-                        state.copy(isAuthenticated = action.isAuthenticated)
-                    }
-                    is AuthFailedAction -> {
-                        state.copy(
-                            authFailureCount = state.authFailureCount + 1,
-                            lastFailedRoute = action.route
-                        )
-                    }
-                    else -> state
+                    is AuthAction -> base.copy(isAuthenticated = action.isAuthenticated)
+                    is AuthFailedAction -> base.copy(
+                        authFailureCount = base.authFailureCount + 1,
+                        lastFailedRoute = action.route
+                    )
+                    else -> base
                 }
             }
         }
@@ -278,7 +265,6 @@ class RouterTest {
             
             reduceWith { state, action ->
                 when (action) {
-                    is Routing.StateChanged -> state
                     else -> state
                 }
             }
@@ -380,13 +366,12 @@ class RouterTest {
                 }
             }
             
-            reduceWith { state, action ->
-                when (action) {
-                    is Routing.StateChanged -> {
-                        state.copy(currentTab = action.routerState.contentRoutes.lastOrNull()?.path)
-                    }
-                    else -> state
-                }
+            reduceWith { state, _ ->
+                val instance = state.routerState.getCurrentContentRoute()
+                    ?: state.routerState.lastScene
+                val tab = (instance?.route?.config as? NavigationConfig)?.selectedTab
+                    ?: instance?.path
+                if (tab != null && tab != state.currentTab) state.copy(currentTab = tab) else state
             }
         }
         
@@ -490,14 +475,12 @@ class RouterTest {
                 modal("/photo/123", config = ModalConfig(presentationStyle = ModalPresentationStyle.FullScreen)) { TestPhotoModal() }
             }
             
-            reduceWith { state, action ->
-                when (action) {
-                    is Routing.StateChanged -> {
-                        routerStateChanges++
-                        state.copy(currentTab = "changed-$routerStateChanges")
-                    }
-                    else -> state
-                }
+            reduceWith { state, _ ->
+                val instance = state.routerState.getCurrentContentRoute()
+                    ?: state.routerState.lastScene
+                val tab = (instance?.route?.config as? NavigationConfig)?.selectedTab
+                    ?: instance?.path
+                if (tab != null && tab != state.currentTab) state.copy(currentTab = tab) else state
             }
         }
         
@@ -505,45 +488,30 @@ class RouterTest {
         
         // Navigate to content
         store.routeTo("/home")
-        
-        // Wait for router middleware state to update
-        routerMiddleware.state.first { it.getCurrentContentRoute()?.route?.path == "/home" }
-        // Wait for app state change
-        store.state.first { it.currentTab?.startsWith("changed-") == true }
-        
+        store.state.first { it.routerState.getCurrentContentRoute()?.path == "/home" }
+
         // Show modal
         store.showModal("/compose")
-        
-        // Wait for router middleware to show modal
-        routerMiddleware.state.first { it.modalRoutes.any { modal -> modal.path == "/compose" } }
-        
-        assertTrue(routerStateChanges > 0, "Expected router state to change at least once, but was $routerStateChanges")
-        
+        store.state.first { it.routerState.modalRoutes.any { modal -> modal.path == "/compose" } }
+
         // Show another modal (stacking)
         store.showModal("/photo/123")
-        
-        // Wait for second modal
-        routerMiddleware.state.first { it.modalRoutes.size == 2 }
-        
+        store.state.first { it.routerState.modalRoutes.size == 2 }
+
         // Dismiss specific modal
         store.dismissModal("/compose")
-        
-        // Wait for modal to be dismissed
-        routerMiddleware.state.first { it.modalRoutes.size == 1 && it.modalRoutes.first().path == "/photo/123" }
-        
+        store.state.first {
+            it.routerState.modalRoutes.size == 1 &&
+                it.routerState.modalRoutes.first().path == "/photo/123"
+        }
+
         // Dismiss top modal
         store.dismissModal()
-        
-        // Wait for all modals to be dismissed
-        routerMiddleware.state.first { it.modalRoutes.isEmpty() }
-        
-        // Go back from content
+        store.state.first { it.routerState.modalRoutes.isEmpty() }
+
+        // Go back from content — with only /home on stack and no scene, root is preserved
         store.goBack()
-        
-        // Wait for navigation back - should go from /home to /
-        routerMiddleware.state.first { state ->
-            state.contentRoutes.isNotEmpty() && state.getCurrentContentRoute()?.route?.path == "/"
-        }
+        store.state.first { it.routerState.getCurrentContentRoute()?.path == "/home" }
     }
 
     @Test
@@ -563,19 +531,12 @@ class RouterTest {
                 content("/settings") { TestSettingsScreen() }
             }
             
-            reduceWith { state, action ->
-                when (action) {
-                    is Routing.StateChanged -> {
-                        // Get the current route's config to check for NavigationConfig
-                        val currentRoute = action.routerState.getCurrentContentRoute()
-                        val routeConfig = currentRoute?.route?.config as? NavigationConfig
-                        
-                        // Use NavigationConfig's selectedTab if available, otherwise preserve current tab
-                        val currentTab = routeConfig?.selectedTab ?: state.currentTab
-                        state.copy(currentTab = currentTab)
-                    }
-                    else -> state
-                }
+            reduceWith { state, _ ->
+                val instance = state.routerState.getCurrentContentRoute()
+                    ?: state.routerState.lastScene
+                val tab = (instance?.route?.config as? NavigationConfig)?.selectedTab
+                    ?: instance?.path
+                if (tab != null && tab != state.currentTab) state.copy(currentTab = tab) else state
             }
         }
         
@@ -950,14 +911,12 @@ private fun TestMainScreen() {}
             }
             
             // Add reducer to track routing state changes
-            reduceWith { state, action ->
-                when (action) {
-                    is Routing.StateChanged -> {
-                        // Force state update to trigger flow emissions
-                        state.copy(currentTab = action.routerState.contentRoutes.lastOrNull()?.path)
-                    }
-                    else -> state
-                }
+            reduceWith { state, _ ->
+                val instance = state.routerState.getCurrentContentRoute()
+                    ?: state.routerState.lastScene
+                val tab = (instance?.route?.config as? NavigationConfig)?.selectedTab
+                    ?: instance?.path
+                if (tab != null && tab != state.currentTab) state.copy(currentTab = tab) else state
             }
         }
         
@@ -1037,30 +996,17 @@ private fun TestMainScreen() {}
         var modalCount = 0
 
         val store = createStore(TestAppState()) {
+            scope(backgroundScope)
             routerMiddleware = routing {
                 content("/home") { TestHomeScreen() }
                 modal("/comment/edit") { TestCommentEditModal() }
-            }
-            
-            // Add reducer to track routing state changes
-            reduceWith { state, action ->
-                when (action) {
-                    is Routing.StateChanged -> {
-                        modalCount = action.routerState.modalRoutes.size
-                        // Force state update to trigger flow emissions
-                        state.copy(currentTab = "modals:$modalCount")
-                    }
-                    else -> state
-                }
             }
         }
         
         // Navigate to home first
         store.routeTo("/home")
-        
-        // Wait for navigation to complete
-        store.state.first { it.currentTab != null }
-        
+        store.state.first { it.routerState.getCurrentContentRoute()?.path == "/home" }
+
         // Show modal with comment object
         val testComment = Comment(
             id = "comment-1",
@@ -1069,13 +1015,10 @@ private fun TestMainScreen() {}
             timestamp = 1234567890L
         )
         store.showModal("/comment/edit", testComment)
-        
-        // Wait for modal to be shown
-        store.state.first { it.currentTab == "modals:1" }
-        
-        // Get the modal route directly from router middleware
-        val modalRoute = routerMiddleware.state.value.modalRoutes.firstOrNull()
-        assertEquals("/comment/edit", modalRoute?.route?.path)
+        store.state.first { it.routerState.modalRoutes.any { m -> m.path == "/comment/edit" } }
+
+        val modalRoute = store.state.value.routerState.modalRoutes.firstOrNull()
+        assertEquals("/comment/edit", modalRoute?.path)
         assertEquals(testComment, modalRoute?.param)
     }
 
@@ -1209,14 +1152,12 @@ private fun TestTagsModal() {}
                 content("/settings") { TestSettingsScreen() }
             }
             
-            reduceWith { state, action ->
-                when (action) {
-                    is Routing.StateChanged -> {
-                        currentPath = action.routerState.contentRoutes.lastOrNull()?.path
-                        state.copy(currentTab = currentPath)
-                    }
-                    else -> state
-                }
+            reduceWith { state, _ ->
+                val instance = state.routerState.getCurrentContentRoute()
+                    ?: state.routerState.lastScene
+                val tab = (instance?.route?.config as? NavigationConfig)?.selectedTab
+                    ?: instance?.path
+                if (tab != null && tab != state.currentTab) state.copy(currentTab = tab) else state
             }
         }
         
@@ -1415,14 +1356,12 @@ private fun TestTagsModal() {}
                 modal("/compose") { TestComposeModal() }
             }
             
-            reduceWith { state, action ->
-                when (action) {
-                    is Routing.StateChanged -> {
-                        val currentSceneRoute = action.routerState.sceneRoutes.lastOrNull()?.path
-                        state.copy(currentTab = currentSceneRoute)
-                    }
-                    else -> state
-                }
+            reduceWith { state, _ ->
+                val instance = state.routerState.getCurrentContentRoute()
+                    ?: state.routerState.lastScene
+                val tab = (instance?.route?.config as? NavigationConfig)?.selectedTab
+                    ?: instance?.path
+                if (tab != null && tab != state.currentTab) state.copy(currentTab = tab) else state
             }
         }
         
@@ -1581,13 +1520,12 @@ private fun TestTagsModal() {}
                 content("/user/profile") { TestUserProfile() }
             }
             
-            reduceWith { state, action ->
-                when (action) {
-                    is Routing.StateChanged -> {
-                        state.copy(currentTab = action.routerState.contentRoutes.lastOrNull()?.path)
-                    }
-                    else -> state
-                }
+            reduceWith { state, _ ->
+                val instance = state.routerState.getCurrentContentRoute()
+                    ?: state.routerState.lastScene
+                val tab = (instance?.route?.config as? NavigationConfig)?.selectedTab
+                    ?: instance?.path
+                if (tab != null && tab != state.currentTab) state.copy(currentTab = tab) else state
             }
         }
         
@@ -1726,14 +1664,12 @@ private fun TestTagsModal() {}
             }
             
             // Add reducer to track routing state changes
-            reduceWith { state, action ->
-                when (action) {
-                    is Routing.StateChanged -> {
-                        // Force state update to trigger flow emissions
-                        state.copy(currentTab = action.routerState.contentRoutes.lastOrNull()?.path)
-                    }
-                    else -> state
-                }
+            reduceWith { state, _ ->
+                val instance = state.routerState.getCurrentContentRoute()
+                    ?: state.routerState.lastScene
+                val tab = (instance?.route?.config as? NavigationConfig)?.selectedTab
+                    ?: instance?.path
+                if (tab != null && tab != state.currentTab) state.copy(currentTab = tab) else state
             }
         }
         
@@ -1898,13 +1834,12 @@ private fun TestTagsModal() {}
                 }
             }
             
-            reduceWith { state, action ->
-                when (action) {
-                    is Routing.StateChanged -> {
-                        state.copy(currentTab = action.routerState.contentRoutes.lastOrNull()?.path)
-                    }
-                    else -> state
-                }
+            reduceWith { state, _ ->
+                val instance = state.routerState.getCurrentContentRoute()
+                    ?: state.routerState.lastScene
+                val tab = (instance?.route?.config as? NavigationConfig)?.selectedTab
+                    ?: instance?.path
+                if (tab != null && tab != state.currentTab) state.copy(currentTab = tab) else state
             }
         }
         

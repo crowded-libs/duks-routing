@@ -21,12 +21,13 @@ class RouterCorrectnessTest {
     data class TestAppState(
         val isAuthenticated: Boolean = false,
         override val routerState: RouterState = RouterState()
-    ) : StateModel, HasRouterState
+    ) : StateModel, HasRouterState {
+        override fun withRouterState(routerState: RouterState) = copy(routerState = routerState)
+    }
 
     data class SetAuth(val authenticated: Boolean) : Action
 
     private fun reduce(state: TestAppState, action: Action): TestAppState = when (action) {
-        is Routing.StateChanged -> state.copy(routerState = action.routerState)
         is SetAuth -> state.copy(isAuthenticated = action.authenticated)
         else -> state
     }

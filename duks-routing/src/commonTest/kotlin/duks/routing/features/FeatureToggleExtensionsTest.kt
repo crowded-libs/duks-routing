@@ -6,7 +6,9 @@ import kotlin.test.*
 
 class FeatureToggleExtensionsTest {
     
-    class TestHasRouterState(override val routerState: RouterState) : HasRouterState
+    class TestHasRouterState(override val routerState: RouterState) : HasRouterState {
+        override fun withRouterState(routerState: RouterState) = TestHasRouterState(routerState)
+    }
     
     @Test
     fun `isFeatureEnabled returns true when feature is in enabled features set`() {

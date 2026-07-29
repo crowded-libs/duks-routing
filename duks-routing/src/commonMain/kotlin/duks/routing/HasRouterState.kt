@@ -1,35 +1,29 @@
 package duks.routing
 
-import duks.Action
 import duks.StateModel
 
 /**
- * Interface for states that include [RouterState] for serialization/restoration.
+ * App state that includes [RouterState].
  *
- * ## Dual-state contract
- *
- * [RouterMiddleware] keeps an authoritative [RouterMiddleware.state] and, on every mutation,
- * dispatches [Routing.StateChanged] (via `dispatchAsync`) so apps can mirror it into
- * [routerState]. Your root reducer **must** apply that action, for example:
+ * When you call `routing { }` on the store builder, the library registers a reducer that
+ * updates [routerState] via [withRouterState]. You do **not** handle routing actions in
+ * your own reducer — read stacks from [routerState] on the store.
  *
  * ```kotlin
- * is Routing.StateChanged -> state.copy(routerState = action.routerState)
- * // or:
- * else -> state.applyRouterStateChanged(action) { copy(routerState = it) }
+ * data class AppState(
+ *     val user: User? = null,
+ *     override val routerState: RouterState = RouterState()
+ * ) : HasRouterState {
+ *     override fun withRouterState(routerState: RouterState) = copy(routerState = routerState)
+ * }
  * ```
- *
- * After each publish, app [routerState] and middleware [RouterMiddleware.state] should match
- * for routes, device context, and [RouterState.enabledFeatures].
  */
 interface HasRouterState : StateModel {
     val routerState: RouterState
-}
 
-/**
- * Applies [Routing.StateChanged] into a [HasRouterState] model using [update].
- * Other actions leave [this] unchanged.
- */
-inline fun <T : HasRouterState> T.applyRouterStateChanged(
-    action: Action,
-    update: T.(RouterState) -> T
-): T = if (action is Routing.StateChanged) update(action.routerState) else this
+    /**
+     * Return a copy of this state with [routerState] replaced.
+     * For data classes: `copy(routerState = routerState)`.
+     */
+    fun withRouterState(routerState: RouterState): HasRouterState
+}

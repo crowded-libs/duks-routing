@@ -22,13 +22,14 @@ data class EncodedRouteParam(
  *
  * [Default] is a process-wide registry apps can configure at startup. Prefer passing a
  * dedicated instance into [RouterBuilder.paramSerializers] when multiple stores coexist.
+ *
+ * Registration is intended at startup (single-threaded). Lookups use snapshot maps.
  */
 class RouteParamRegistry(
     private val json: Json = defaultJson
 ) {
-    private val lock = Any()
-    private val byTypeName = mutableMapOf<String, KSerializer<*>>()
-    private val byClassName = mutableMapOf<String, String>()
+    private var byTypeName: Map<String, KSerializer<*>> = emptyMap()
+    private var byClassName: Map<String, String> = emptyMap()
 
     init {
         register(String.serializer(), "kotlin.String")
@@ -43,9 +44,7 @@ class RouteParamRegistry(
      * Register a serializer under an explicit type name (stable across platforms).
      */
     fun <T : Any> register(serializer: KSerializer<T>, typeName: String = serializer.descriptor.serialName) {
-        synchronized(lock) {
-            byTypeName[typeName] = serializer
-        }
+        byTypeName = byTypeName + (typeName to serializer)
     }
 
     /**
@@ -59,27 +58,23 @@ class RouteParamRegistry(
     @PublishedApi
     internal fun indexClassName(className: String?, typeName: String) {
         if (className != null) {
-            synchronized(lock) {
-                byClassName[className] = typeName
-            }
+            byClassName = byClassName + (className to typeName)
         }
     }
 
     fun encode(param: Any): EncodedRouteParam? {
         val className = param::class.qualifiedName ?: param::class.simpleName ?: return null
-        val typeName = synchronized(lock) {
-            byClassName[className] ?: when (param) {
-                is String -> "kotlin.String"
-                is Int -> "kotlin.Int"
-                is Long -> "kotlin.Long"
-                is Boolean -> "kotlin.Boolean"
-                is Float -> "kotlin.Float"
-                is Double -> "kotlin.Double"
-                else -> null
-            }
+        val typeName = byClassName[className] ?: when (param) {
+            is String -> "kotlin.String"
+            is Int -> "kotlin.Int"
+            is Long -> "kotlin.Long"
+            is Boolean -> "kotlin.Boolean"
+            is Float -> "kotlin.Float"
+            is Double -> "kotlin.Double"
+            else -> null
         } ?: return null
 
-        val serializer = synchronized(lock) { byTypeName[typeName] } ?: return null
+        val serializer = byTypeName[typeName] ?: return null
         return try {
             @Suppress("UNCHECKED_CAST")
             val payload = json.encodeToString(serializer as KSerializer<Any>, param)
@@ -90,7 +85,7 @@ class RouteParamRegistry(
     }
 
     fun decode(type: String, payload: String): Any? {
-        val serializer = synchronized(lock) { byTypeName[type] } ?: return null
+        val serializer = byTypeName[type] ?: return null
         return try {
             json.decodeFromString(serializer, payload)
         } catch (_: Exception) {
