@@ -214,20 +214,50 @@ routing {
         // Or restore only selected route types
         restoreOnly(RouteType.Scene, RouteType.Content)
 
-        // Conditional defaults override restored routes when a condition matches
-        conditionalDefaults {
+        // Conditional defaults — mode controls when they replace restored stacks
+        conditionalDefaults(mode = ConditionalDefaultsMode.OnlyIfEmpty) {
             `when` { state -> state.user == null } then "/login"
             `when` { state -> state.user?.isOnboarded == true } then "/home"
             otherwise("/onboarding")
         }
     }
+
+    // Optional: custom param codecs (String/Int/… are built-in)
+    // registerParamSerializer<MyId>()
 }
 ```
+
+| Conditional mode | Behavior |
+|---|---|
+| `OverrideAlways` (default) | Matching default always replaces restored routes |
+| `OnlyIfEmpty` | Defaults only when the restored stack is empty |
+| `OnlyIfInvalid` | Defaults when empty or restored paths are unknown |
 
 Apps that implement `HasRouterState` should copy `Routing.StateChanged` into their root state:
 
 ```kotlin
 is Routing.StateChanged -> state.copy(routerState = action.routerState)
+```
+
+### Serializable route parameters
+
+Primitive params (`String`, `Int`, `Long`, `Boolean`, `Float`, `Double`) round-trip through
+`RouterState` JSON automatically. Register other `@Serializable` types:
+
+```kotlin
+RouteParamRegistry.Default.register<ProductId>()
+// or inside routing { registerParamSerializer<ProductId>() }
+```
+
+Unregistered / non-serializable params keep the path on disk but drop the param value.
+
+### Path templates and deep links
+
+```kotlin
+content("/item/{id}") { /* routeParam<String>() */ }
+
+store.routeTo("/item/42")                 // param = "42"
+store.dispatch(Routing.DeepLink("myapp://host/item/42?src=push"))
 ```
 
 ## Navigation Actions

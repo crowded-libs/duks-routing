@@ -47,6 +47,7 @@ kotlin {
                 implementation(libs.duks)
                 implementation(libs.kotlinx.coroutines.core)
                 implementation(libs.kotlinx.serialization)
+                implementation(libs.kotlinx.serialization.json)
             }
         }
 

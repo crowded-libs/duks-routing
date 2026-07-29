@@ -60,11 +60,34 @@ class RouterBuilder<TState: StateModel> {
     private var initialRoutePath: String? = null
     private var restorationStrategy: RestorationStrategy = RestorationStrategy.RestoreAll
     private var featureToggleEvaluator: FeatureToggleEvaluator? = null
+    private var _paramRegistry: RouteParamRegistry = RouteParamRegistry.Default
+
+    /** Active param registry used for restoration (and registration helpers). */
+    val paramRegistry: RouteParamRegistry
+        get() = _paramRegistry
     
     // Set the initial route for the application
     fun initialRoute(path: String) {
         logger.debug(path) { "Setting initial route: {path}" }
         initialRoutePath = path
+    }
+
+    /**
+     * Use a custom [RouteParamRegistry] for restoring encoded route parameters.
+     * Defaults to [RouteParamRegistry.Default] (shared process-wide registry).
+     */
+    fun paramSerializers(registry: RouteParamRegistry) {
+        this._paramRegistry = registry
+        logger.debug { "Configured route param registry" }
+    }
+
+    /**
+     * Register a serializable param type on the active registry (usually [RouteParamRegistry.Default]).
+     */
+    inline fun <reified T : Any> registerParamSerializer(
+        typeName: String = kotlinx.serialization.serializer<T>().descriptor.serialName
+    ) {
+        paramRegistry.register<T>(typeName)
     }
     
     // Scene route - replaces entire screen
@@ -256,6 +279,8 @@ class RouterBuilder<TState: StateModel> {
     fun getRestorationStrategy(): RestorationStrategy = restorationStrategy
     
     fun getFeatureToggleEvaluator(): FeatureToggleEvaluator? = featureToggleEvaluator
+
+    internal fun resolveParamRegistry(): RouteParamRegistry = _paramRegistry
 }
 
 // Route group builder
@@ -427,6 +452,7 @@ fun <TState: StateModel> StoreBuilder<TState>.routing(
     val initialRoute = builder.getInitialRoute()
     val restorationStrategy = builder.getRestorationStrategy()
     val featureToggleEvaluator = builder.getFeatureToggleEvaluator()
+    val paramRegistry = builder.resolveParamRegistry()
     
     val routerMiddleware = RouterMiddleware<TState>(
         authConfig = authConfig,
@@ -434,7 +460,8 @@ fun <TState: StateModel> StoreBuilder<TState>.routing(
         fallbackRoute = fallbackRoute,
         initialRoute = initialRoute,
         restorationStrategy = restorationStrategy,
-        featureToggleEvaluator = featureToggleEvaluator
+        featureToggleEvaluator = featureToggleEvaluator,
+        paramRegistry = paramRegistry
     )
     
     middleware {

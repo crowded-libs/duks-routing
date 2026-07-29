@@ -17,7 +17,8 @@ class RouterMiddleware<TState: StateModel>(
     private val fallbackRoute: String = "/404",
     private val initialRoute: String? = null,
     private val restorationStrategy: RestorationStrategy = RestorationStrategy.RestoreAll,
-    private val featureToggleEvaluator: FeatureToggleEvaluator? = null
+    private val featureToggleEvaluator: FeatureToggleEvaluator? = null,
+    private val paramRegistry: RouteParamRegistry = RouteParamRegistry.Default
 ) : Middleware<TState>, StoreLifecycleAware<TState> {
     private val logger = Logger.default()
     
@@ -356,25 +357,28 @@ class RouterMiddleware<TState: StateModel>(
         val path = normalizePath(action.path)
         logger.debug(path, action.layer ?: "auto", action.param) { "Navigating to: {path}, layer: {layer}, param: {param}" }
         
-        val matchingRoutes = findMatchingRoutes(path, state.deviceContext, store.state.value)
+        val matching = findMatchingRoutesWithParams(path, state.deviceContext, store.state.value)
         
         // If layer is specified, filter by it
-        val route = if (action.layer != null) {
-            matchingRoutes.firstOrNull { it.layer == action.layer }
+        val matched = if (action.layer != null) {
+            matching.firstOrNull { it.route.layer == action.layer }
         } else {
-            matchingRoutes.firstOrNull()
+            matching.firstOrNull()
         }
 
         val mode = resolveNavigationMode(action)
 
-        if (route == null) {
+        if (matched == null) {
             logger.warn(path, fallbackRoute) { "Route not found: {path}, attempting fallback to: {fallbackRoute}" }
             // Try fallback
-            val fallbackRoutes = findMatchingRoutes(fallbackRoute, state.deviceContext, store.state.value)
+            val fallbackRoutes = findMatchingRoutesWithParams(fallbackRoute, state.deviceContext, store.state.value)
             return fallbackRoutes.firstOrNull()?.let { fallback ->
-                navigateToRoute(fallback, action.param, action.layer ?: fallback.layer, state, mode)
+                navigateToRoute(fallback.route, action.param, action.layer ?: fallback.route.layer, state, mode)
             } ?: state
         }
+
+        val route = matched.route
+        val effectiveParam = action.param ?: matched.pathMatch.inferredParam()
 
         // Check authentication
         if (route.requiresAuth && !authConfig.authChecker(store.state.value)) {
@@ -387,7 +391,7 @@ class RouterMiddleware<TState: StateModel>(
         }
 
         logger.debug(route.path, route.layer, mode) { "Successfully navigating to route: {routePath} on layer: {routeLayer} mode={mode}" }
-        return navigateToRoute(route, action.param, action.layer ?: route.layer, state, mode)
+        return navigateToRoute(route, effectiveParam, action.layer ?: route.layer, state, mode)
     }
 
     private fun resolveNavigationMode(action: Routing.NavigateTo): NavigationMode =
@@ -395,8 +399,10 @@ class RouterMiddleware<TState: StateModel>(
 
     private fun handleReplaceContent(store: KStore<TState>, action: Routing.ReplaceContent, state: RouterState): RouterState {
         val path = normalizePath(action.path)
-        val matchingRoutes = findMatchingRoutes(path, state.deviceContext, store.state.value)
-        val route = matchingRoutes.firstOrNull() ?: return state
+        val matched = findMatchingRoutesWithParams(path, state.deviceContext, store.state.value).firstOrNull()
+            ?: return state
+        val route = matched.route
+        val effectiveParam = action.param ?: matched.pathMatch.inferredParam()
 
         if (route.requiresAuth && !authConfig.authChecker(store.state.value)) {
             return redirectForAuthFailure(store, route, state)
@@ -404,7 +410,7 @@ class RouterMiddleware<TState: StateModel>(
 
         return when (route.layer) {
             NavigationLayer.Content -> state.copy(
-                contentRoutes = listOf(createRouteInstance(route, action.param)),
+                contentRoutes = listOf(createRouteInstance(route, effectiveParam)),
                 modalRoutes = emptyList(),
                 lastRouteType = RouteType.Content
             )
@@ -497,20 +503,23 @@ class RouterMiddleware<TState: StateModel>(
         val path = normalizePath(action.path)
         logger.debug(path, action.param) { "Showing modal: {path}, param: {param}" }
         
-        val matchingRoutes = findMatchingRoutes(path, state.deviceContext, store.state.value)
-        val route = matchingRoutes.firstOrNull { it.layer == NavigationLayer.Modal }
+        val matched = findMatchingRoutesWithParams(path, state.deviceContext, store.state.value)
+            .firstOrNull { it.route.layer == NavigationLayer.Modal }
         
-        if (route == null) {
+        if (matched == null) {
             logger.warn(path) { "Modal route not found: {path}" }
             return state
         }
+
+        val route = matched.route
+        val effectiveParam = action.param ?: matched.pathMatch.inferredParam()
 
         if (route.requiresAuth && !authConfig.authChecker(store.state.value)) {
             return redirectForAuthFailure(store, route, state)
         }
 
         return state.copy(
-            modalRoutes = state.modalRoutes + createRouteInstance(route, action.param),
+            modalRoutes = state.modalRoutes + createRouteInstance(route, effectiveParam),
             lastRouteType = RouteType.Modal
         )
     }
@@ -531,8 +540,12 @@ class RouterMiddleware<TState: StateModel>(
     }
 
     private fun handleDeepLink(store: KStore<TState>, action: Routing.DeepLink, state: RouterState): RouterState {
-        val path = parseDeepLink(action.url)
-        return handleNavigateTo(store, Routing.NavigateTo(path), state)
+        val parsed = parseDeepLink(action.url)
+        logger.debug(parsed.path, parsed.scheme, parsed.host) {
+            "Deep link parsed path={path} scheme={scheme} host={host}"
+        }
+        // Explicit param null so path templates / single-segment params can fill in
+        return handleNavigateTo(store, Routing.NavigateTo(path = parsed.path), state)
     }
 
     private fun redirectForAuthFailure(
@@ -545,14 +558,14 @@ class RouterMiddleware<TState: StateModel>(
             "Authentication required for route: {path}, redirecting to: {unauthPath}"
         }
         authConfig.onAuthFailure?.invoke(store, route)
-        val authRoutes = findMatchingRoutes(
+        val authRoutes = findMatchingRoutesWithParams(
             normalizePath(authConfig.unauthenticatedRoute),
             state.deviceContext,
             store.state.value
         )
         // Always use the unauthenticated route's layer (not the protected route's layer)
-        return authRoutes.firstOrNull()?.let { authRoute ->
-            navigateToRoute(authRoute, param = null, authRoute.layer, state, mode)
+        return authRoutes.firstOrNull()?.let { matched ->
+            navigateToRoute(matched.route, param = null, matched.route.layer, state, mode)
         } ?: state
     }
 
@@ -565,12 +578,12 @@ class RouterMiddleware<TState: StateModel>(
 
     private suspend fun applySessionLossRedirect(store: KStore<TState>) {
         val current = internalState.value
-        val unauthRoutes = findMatchingRoutes(
+        val unauthRoutes = findMatchingRoutesWithParams(
             normalizePath(authConfig.unauthenticatedRoute),
             current.deviceContext,
             store.state.value
         )
-        val unauth = unauthRoutes.firstOrNull()
+        val unauth = unauthRoutes.firstOrNull()?.route
         if (unauth == null) {
             logger.warn(authConfig.unauthenticatedRoute) {
                 "Session loss redirect failed; unauthenticated route not found: {path}"
@@ -711,26 +724,34 @@ class RouterMiddleware<TState: StateModel>(
         }
     }
 
-    private fun findMatchingRoutes(path: String, deviceContext: DeviceContext?, appState: TState? = null): List<Route<*>> {
-        return routes
-            .filter { it.path == path }
-            .filter { route ->
-                // Check feature requirement
-                if (route.requiredFeature != null && featureToggleEvaluator != null && appState != null) {
-                    if (!featureToggleEvaluator.isFeatureEnabled(appState, route.requiredFeature)) {
-                        return@filter false
-                    }
-                }
-                
-                // Check render conditions
-                if (deviceContext == null || route.renderConditions.isEmpty()) {
-                    true
-                } else {
-                    route.renderConditions.all { condition ->
-                        evaluateCondition(condition, deviceContext, appState)
-                    }
+    private data class MatchedRoute(
+        val route: Route<*>,
+        val pathMatch: PathMatch
+    )
+
+    private fun findMatchingRoutesWithParams(
+        path: String,
+        deviceContext: DeviceContext?,
+        appState: TState? = null
+    ): List<MatchedRoute> {
+        return routes.mapNotNull { route ->
+            val pathMatch = matchPath(route.path, path) ?: return@mapNotNull null
+
+            if (route.requiredFeature != null && featureToggleEvaluator != null && appState != null) {
+                if (!featureToggleEvaluator.isFeatureEnabled(appState, route.requiredFeature)) {
+                    return@mapNotNull null
                 }
             }
+
+            if (deviceContext != null && route.renderConditions.isNotEmpty()) {
+                val ok = route.renderConditions.all { condition ->
+                    evaluateCondition(condition, deviceContext, appState)
+                }
+                if (!ok) return@mapNotNull null
+            }
+
+            MatchedRoute(route, pathMatch)
+        }
     }
 
     private fun evaluateCondition(condition: RenderCondition, context: DeviceContext, appState: TState? = null): Boolean {
@@ -769,47 +790,61 @@ class RouterMiddleware<TState: StateModel>(
             currentState = currentState
         )
         
-        // Always evaluate conditional defaults when using RestoreWithDefaults strategy
-        if (strategy is RestorationStrategy.RestoreWithDefaults<*>) {
-            @Suppress("UNCHECKED_CAST")
-            val defaults = strategy.conditionalDefaults as ConditionalDefaultsConfig<TState>
-            if (currentState != null) {
-                // Apply conditional defaults - if one matches, use it instead of restored routes
-                val conditionalRouterState = applyConditionalDefaults(defaults, currentState, availableRoutes)
-                if (conditionalRouterState != null) {
-                    return conditionalRouterState
+        // Convert serializable routes back to actual RouteInstances (with decoded params)
+        val routeMap = availableRoutes.associateBy { it.path }
+
+        fun rehydrate(list: List<RouteInstance>): List<RouteInstance> =
+            list.mapNotNull { instance ->
+                val decoded = when (instance) {
+                    is SerializableRouteInstance -> instance.withDecodedParam(paramRegistry)
+                    else -> instance
+                }
+                routeMap[decoded.path]?.let { route ->
+                    createRouteInstance(route, decoded.param)
                 }
             }
-        }
-        
-        // Convert serializable routes back to actual RouteInstances
-        val routeMap = availableRoutes.associateBy { it.path }
-        
-        val sceneRoutes = filteredRouterState.sceneRoutes.mapNotNull { serializableRoute ->
-            routeMap[serializableRoute.path]?.let { route ->
-                createRouteInstance(route, serializableRoute.param)
-            }
-        }
-        
-        val contentRoutes = filteredRouterState.contentRoutes.mapNotNull { serializableRoute ->
-            routeMap[serializableRoute.path]?.let { route ->
-                createRouteInstance(route, serializableRoute.param)
-            }
-        }
-        
-        val modalRoutes = filteredRouterState.modalRoutes.mapNotNull { serializableRoute ->
-            routeMap[serializableRoute.path]?.let { route ->
-                createRouteInstance(route, serializableRoute.param)
-            }
-        }
-        
-        return RouterState(
+
+        val sceneRoutes = rehydrate(filteredRouterState.sceneRoutes)
+        val contentRoutes = rehydrate(filteredRouterState.contentRoutes)
+        val modalRoutes = rehydrate(filteredRouterState.modalRoutes)
+
+        val rehydrated = RouterState(
             sceneRoutes = sceneRoutes,
             contentRoutes = contentRoutes,
             modalRoutes = modalRoutes,
             deviceContext = filteredRouterState.deviceContext,
             lastRouteType = filteredRouterState.lastRouteType
         )
+
+        // Conditional defaults — mode decides whether they override rehydrated stacks
+        if (strategy is RestorationStrategy.RestoreWithDefaults<*>) {
+            @Suppress("UNCHECKED_CAST")
+            val defaults = strategy.conditionalDefaults as ConditionalDefaultsConfig<TState>
+            if (currentState != null && shouldApplyConditionalDefaults(defaults, rehydrated, availableRoutes)) {
+                val conditionalRouterState = applyConditionalDefaults(defaults, currentState, availableRoutes)
+                if (conditionalRouterState != null) {
+                    return conditionalRouterState
+                }
+            }
+        }
+
+        return rehydrated
+    }
+
+    private fun <TState: StateModel> shouldApplyConditionalDefaults(
+        config: ConditionalDefaultsConfig<TState>,
+        restored: RouterState,
+        availableRoutes: List<Route<*>>
+    ): Boolean {
+        return when (config.mode) {
+            ConditionalDefaultsMode.OverrideAlways -> true
+            ConditionalDefaultsMode.OnlyIfEmpty -> !hasRoutes(restored)
+            ConditionalDefaultsMode.OnlyIfInvalid -> {
+                if (!hasRoutes(restored)) return true
+                val known = availableRoutes.map { it.path }.toSet()
+                restored.getActiveRoutes().any { it.path !in known }
+            }
+        }
     }
     
     private fun hasRoutes(routerState: RouterState): Boolean {
@@ -877,8 +912,4 @@ class RouterMiddleware<TState: StateModel>(
 
 internal fun normalizePath(path: String): String {
     return "/" + path.trim('/').split('/').filter { it.isNotEmpty() }.joinToString("/")
-}
-
-private fun parseDeepLink(url: String): String {
-    return url.substringAfter("://").let { "/$it" }
 }

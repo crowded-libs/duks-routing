@@ -13,11 +13,34 @@ data class ConditionalDefault<TState: StateModel>(
 )
 
 /**
+ * When conditional defaults run relative to restored route stacks.
+ */
+enum class ConditionalDefaultsMode {
+    /**
+     * If a condition (or `otherwise`) matches, always replace restored routes.
+     * This is the historical default.
+     */
+    OverrideAlways,
+
+    /**
+     * Apply defaults only when the restored stack is empty after the base strategy.
+     */
+    OnlyIfEmpty,
+
+    /**
+     * Apply defaults when the restored stack is empty, or any restored path no longer
+     * matches a registered route (or fails basic validity).
+     */
+    OnlyIfInvalid
+}
+
+/**
  * Configuration for conditional defaults during restoration.
  */
 data class ConditionalDefaultsConfig<TState: StateModel>(
     val defaults: List<ConditionalDefault<TState>> = emptyList(),
-    val fallbackRoute: String? = null
+    val fallbackRoute: String? = null,
+    val mode: ConditionalDefaultsMode = ConditionalDefaultsMode.OverrideAlways
 )
 
 /**
@@ -88,9 +111,14 @@ class RestorationBuilder<TState: StateModel> {
     
     /**
      * Configure conditional defaults for restoration.
+     *
+     * @param mode When defaults override restored stacks; see [ConditionalDefaultsMode]
      */
-    fun conditionalDefaults(block: ConditionalDefaultsBuilder<TState>.() -> Unit) {
-        val builder = ConditionalDefaultsBuilder<TState>()
+    fun conditionalDefaults(
+        mode: ConditionalDefaultsMode = ConditionalDefaultsMode.OverrideAlways,
+        block: ConditionalDefaultsBuilder<TState>.() -> Unit
+    ) {
+        val builder = ConditionalDefaultsBuilder<TState>(mode)
         builder.block()
         
         val baseStrategy = strategy // Use the current strategy as base
@@ -136,7 +164,9 @@ class RestoreSpecificBuilder {
 /**
  * Builder for configuring conditional defaults.
  */
-class ConditionalDefaultsBuilder<TState: StateModel> {
+class ConditionalDefaultsBuilder<TState: StateModel>(
+    private val mode: ConditionalDefaultsMode = ConditionalDefaultsMode.OverrideAlways
+) {
     private val defaults = mutableListOf<ConditionalDefault<TState>>()
     private var fallbackRoute: String? = null
     
@@ -162,7 +192,8 @@ class ConditionalDefaultsBuilder<TState: StateModel> {
     internal fun build(): ConditionalDefaultsConfig<TState> {
         return ConditionalDefaultsConfig(
             defaults = defaults.toList(),
-            fallbackRoute = fallbackRoute
+            fallbackRoute = fallbackRoute,
+            mode = mode
         )
     }
 }
