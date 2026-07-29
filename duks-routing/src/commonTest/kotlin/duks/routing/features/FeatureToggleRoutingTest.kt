@@ -6,6 +6,7 @@ import duks.StateModel
 import duks.createStore
 import duks.routing.*
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import kotlin.test.*
 import kotlin.time.Duration.Companion.seconds
@@ -349,6 +350,58 @@ class FeatureToggleRoutingTest {
             it.enabledFeatures == setOf("feature3")
         }
         assertEquals(setOf("feature3"), replacedState.enabledFeatures)
+    }
+
+    @Test
+    fun `enabledFeatures refresh when app feature flags change`() = runTest(timeout = 5.seconds) {
+        lateinit var routerMiddleware: RouterMiddleware<TestAppState>
+        val store = createStore(TestAppState()) {
+            scope(backgroundScope)
+            routerMiddleware = routing {
+                featureToggles(TestFeatureEvaluator())
+                content("/", requiredFeature = "beta") { TestScreen("Gated") }
+                content("/home") { TestScreen("Home") }
+            }
+            reduceWith { state, action ->
+                when (action) {
+                    is UpdateFeaturesAction -> state.copy(enabledFeatures = action.features)
+                    else -> state
+                }
+            }
+        }
+
+        store.routeTo("/home")
+        routerMiddleware.state.first { it.contentRoutes.any { r -> r.path == "/home" } }
+        assertEquals(emptySet(), routerMiddleware.state.value.enabledFeatures)
+
+        store.dispatch(UpdateFeaturesAction(setOf("beta")))
+        routerMiddleware.state.first { it.enabledFeatures.contains("beta") }
+        assertEquals(setOf("beta"), store.state.value.routerState.enabledFeatures)
+    }
+
+    @Test
+    fun `feature re-eval can be disabled`() = runTest(timeout = 5.seconds) {
+        lateinit var routerMiddleware: RouterMiddleware<TestAppState>
+        val store = createStore(TestAppState()) {
+            scope(backgroundScope)
+            routerMiddleware = routing {
+                featureToggles(TestFeatureEvaluator(), reevaluateOnAppStateChange = false)
+                content("/home") { TestScreen("Home") }
+            }
+            reduceWith { state, action ->
+                when (action) {
+                    is UpdateFeaturesAction -> state.copy(enabledFeatures = action.features)
+                    else -> state
+                }
+            }
+        }
+
+        store.routeTo("/home")
+        routerMiddleware.state.first { it.contentRoutes.isNotEmpty() }
+        store.dispatch(UpdateFeaturesAction(setOf("beta")))
+        advanceUntilIdle()
+
+        assertEquals(emptySet(), routerMiddleware.state.value.enabledFeatures)
     }
     
     @Test

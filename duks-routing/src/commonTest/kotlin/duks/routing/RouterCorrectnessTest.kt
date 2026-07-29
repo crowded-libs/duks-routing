@@ -189,6 +189,15 @@ class RouterCorrectnessTest {
         assertFalse(route.pathEquals("/home-settings"))
     }
 
+    @Test
+    fun `withRouterState replaces router slice`() {
+        val state = TestAppState()
+        val next = RouterState(contentRoutes = listOf(SerializableRouteInstance("/home")))
+        val updated = state.withRouterState(next)
+        assertEquals("/home", updated.routerState.contentRoutes.single().path)
+        assertTrue(state.routerState.contentRoutes.isEmpty())
+    }
+
     @Composable
     private fun EmptyScreen() {}
 }
