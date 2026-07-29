@@ -61,6 +61,8 @@ class RouterBuilder<TState: StateModel> {
     private var restorationStrategy: RestorationStrategy = RestorationStrategy.RestoreAll
     private var featureToggleEvaluator: FeatureToggleEvaluator? = null
     private var _paramRegistry: RouteParamRegistry = RouteParamRegistry.Default
+    private val navigationListeners = mutableListOf<NavigationListener>()
+    private var reevaluateFeaturesOnAppStateChange: Boolean = true
 
     /** Active param registry used for restoration (and registration helpers). */
     val paramRegistry: RouteParamRegistry
@@ -266,10 +268,26 @@ class RouterBuilder<TState: StateModel> {
     
     /**
      * Configure feature toggle evaluator for the router.
+     *
+     * @param reevaluateOnAppStateChange When true (default), any non-routing action that changes
+     *   app state will re-run the evaluator and update [RouterState.enabledFeatures] if needed.
      */
-    fun featureToggles(evaluator: FeatureToggleEvaluator) {
+    fun featureToggles(
+        evaluator: FeatureToggleEvaluator,
+        reevaluateOnAppStateChange: Boolean = true
+    ) {
         this.featureToggleEvaluator = evaluator
+        this.reevaluateFeaturesOnAppStateChange = reevaluateOnAppStateChange
         logger.debug { "Configured feature toggle evaluator" }
+    }
+
+    /**
+     * Observe committed router transitions (after [Routing.StateChanged] is published).
+     * Useful for analytics / screen tracking.
+     */
+    fun onNavigation(listener: NavigationListener) {
+        navigationListeners.add(listener)
+        logger.debug { "Registered navigation listener" }
     }
     
     fun build(): List<Route<*>> = routes.toList()
@@ -281,6 +299,10 @@ class RouterBuilder<TState: StateModel> {
     fun getFeatureToggleEvaluator(): FeatureToggleEvaluator? = featureToggleEvaluator
 
     internal fun resolveParamRegistry(): RouteParamRegistry = _paramRegistry
+
+    internal fun resolveNavigationListeners(): List<NavigationListener> = navigationListeners.toList()
+
+    internal fun resolveReevaluateFeaturesOnAppStateChange(): Boolean = reevaluateFeaturesOnAppStateChange
 }
 
 // Route group builder
@@ -454,14 +476,16 @@ fun <TState: StateModel> StoreBuilder<TState>.routing(
     val featureToggleEvaluator = builder.getFeatureToggleEvaluator()
     val paramRegistry = builder.resolveParamRegistry()
     
-    val routerMiddleware = RouterMiddleware<TState>(
+    val routerMiddleware = RouterMiddleware(
         authConfig = authConfig,
         routes = routeList,
         fallbackRoute = fallbackRoute,
         initialRoute = initialRoute,
         restorationStrategy = restorationStrategy,
         featureToggleEvaluator = featureToggleEvaluator,
-        paramRegistry = paramRegistry
+        paramRegistry = paramRegistry,
+        navigationListeners = builder.resolveNavigationListeners(),
+        reevaluateFeaturesOnAppStateChange = builder.resolveReevaluateFeaturesOnAppStateChange()
     )
     
     middleware {

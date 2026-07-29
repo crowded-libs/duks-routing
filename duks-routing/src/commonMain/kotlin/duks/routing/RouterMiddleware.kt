@@ -10,7 +10,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
-// Router middleware with isolated state
+/**
+ * Router middleware: authoritative [state] plus [Routing.StateChanged] publish for [HasRouterState].
+ *
+ * **Sync contract:** every mutation of [state] goes through [commitRouterState], which
+ * `dispatchAsync`s [Routing.StateChanged] so app reducers can mirror into [HasRouterState.routerState].
+ * Feature flags are re-evaluated when non-routing actions change app state (when an evaluator is set).
+ */
 class RouterMiddleware<TState: StateModel>(
     private val authConfig: AuthConfig<TState>,
     private val routes: List<Route<*>>,
@@ -18,11 +24,13 @@ class RouterMiddleware<TState: StateModel>(
     private val initialRoute: String? = null,
     private val restorationStrategy: RestorationStrategy = RestorationStrategy.RestoreAll,
     private val featureToggleEvaluator: FeatureToggleEvaluator? = null,
-    private val paramRegistry: RouteParamRegistry = RouteParamRegistry.Default
+    private val paramRegistry: RouteParamRegistry = RouteParamRegistry.Default,
+    private val navigationListeners: List<NavigationListener> = emptyList(),
+    private val reevaluateFeaturesOnAppStateChange: Boolean = true
 ) : Middleware<TState>, StoreLifecycleAware<TState> {
     private val logger = Logger.default()
     
-    // Private mutable state
+    // Private mutable state — authoritative; mirrored via Routing.StateChanged
     private val internalState = MutableStateFlow(RouterState())
     private var hasInitialized = false
 
@@ -105,28 +113,19 @@ class RouterMiddleware<TState: StateModel>(
                     if (newState != currentState) {
                         logger.debug(action::class.simpleName) { "Router state changing due to action: {actionType}" }
                         
-                        // Update enabled features based on current app state
                         val enabledFeatures = evaluateFeatures(store.state.value)
                         val stateWithFeatures = newState.copy(enabledFeatures = enabledFeatures)
-                        
-                        // Update state
-                        internalState.value = stateWithFeatures
 
-                        // Pass the original action through
+                        // Pass the original action through first, then commit + StateChanged
                         val result = next(action)
-
-                        // Await so app HasRouterState stays in lockstep with middleware state
-                        publishStateChanged(store, stateWithFeatures)
-
+                        commitRouterState(store, currentState, stateWithFeatures, action)
                         result
                     } else {
-                        // Pass through the action even if state didn't change
                         next(action)
                     }
                 }
             }
             is DeviceAction -> {
-                // Update device context in router state
                 val currentState = internalState.value
                 val newState = when (action) {
                     is DeviceAction.UpdateDeviceContext -> {
@@ -165,14 +164,12 @@ class RouterMiddleware<TState: StateModel>(
                     }
                 }
                 
-                // Preserve enabled features when updating device context
                 val stateWithFeatures = newState.copy(
                     enabledFeatures = evaluateFeatures(store.state.value)
                 )
                 val result = next(action)
                 if (stateWithFeatures != currentState) {
-                    internalState.value = stateWithFeatures
-                    publishStateChanged(store, stateWithFeatures)
+                    commitRouterState(store, currentState, stateWithFeatures, action)
                 }
                 result
             }
@@ -239,20 +236,13 @@ class RouterMiddleware<TState: StateModel>(
                         logger.debug(restoredPaths) { "Restored routes: {routes}" }
                     }
                     
-                    // Update enabled features based on restored state
                     val enabledFeatures = evaluateFeatures(restoredState)
                     val stateWithFeatures = restoredInternalState.copy(enabledFeatures = enabledFeatures)
-                    
-                    internalState.value = stateWithFeatures
                     hasInitialized = true
                     lastKnownAuthenticated = authConfig.authChecker(restoredState)
-                    
-                    // Dispatch state change notification AFTER the RestoreStateAction has been processed
-                    // This ensures the app gets the real routes, not the serializable ones
-                    publishStateChanged(store, stateWithFeatures)
+                    // After RestoreStateAction so app gets live RouteInstances, not wire format only
+                    commitRouterState(store, internalState.value, stateWithFeatures, action)
                 } else {
-                    // No router state restored - check if we should apply initial route
-                    // Only apply if no routes exist (in case onStoreCreated didn't run yet)
                     if (!hasRoutes(internalState.value)) {
                         applyInitialRoute(store)
                         hasInitialized = true
@@ -276,20 +266,49 @@ class RouterMiddleware<TState: StateModel>(
                     logger.info(authConfig.unauthenticatedRoute) {
                         "Session loss detected with protected routes active; redirecting to {unauthPath}"
                     }
-                    applySessionLossRedirect(store)
+                    applySessionLossRedirect(store, action)
+                } else if (reevaluateFeaturesOnAppStateChange) {
+                    refreshEnabledFeaturesIfChanged(store, action)
                 }
                 result
             }
         }
     }
 
-    private suspend fun publishStateChanged(store: KStore<TState>, routerState: RouterState) {
+    /**
+     * Single write path for router mutations: update [state], publish [Routing.StateChanged],
+     * then notify [navigationListeners].
+     */
+    private suspend fun commitRouterState(
+        store: KStore<TState>,
+        previous: RouterState,
+        next: RouterState,
+        causingAction: Action
+    ) {
+        if (previous == next) return
+        internalState.value = next
         try {
-            store.dispatchAsync(Routing.StateChanged(routerState))
+            store.dispatchAsync(Routing.StateChanged(next))
         } catch (e: Exception) {
             logger.error("Failed to dispatch StateChanged: ${e.message}")
             throw e
         }
+        navigationListeners.forEach { listener ->
+            try {
+                listener.onRouterStateChanged(previous, next, causingAction)
+            } catch (e: Exception) {
+                logger.error("NavigationListener failed: ${e.message}")
+            }
+        }
+    }
+
+    private suspend fun refreshEnabledFeaturesIfChanged(store: KStore<TState>, action: Action) {
+        if (featureToggleEvaluator == null) return
+        val previous = internalState.value
+        val enabled = evaluateFeatures(store.state.value)
+        if (enabled == previous.enabledFeatures) return
+        logger.debug { "Feature flags changed after app action; refreshing RouterState.enabledFeatures" }
+        commitRouterState(store, previous, previous.copy(enabledFeatures = enabled), action)
     }
 
     private fun findInitialRoute(): Route<*>? {
@@ -327,15 +346,12 @@ class RouterMiddleware<TState: StateModel>(
                 NavigationLayer.Content -> RouterState(contentRoutes = listOf(instance), lastRouteType = RouteType.Content, enabledFeatures = enabledFeatures)
                 NavigationLayer.Modal -> RouterState(modalRoutes = listOf(instance), lastRouteType = RouteType.Modal, enabledFeatures = enabledFeatures)
             }
-            
-            internalState.value = initialInternalState
-            
-            try {
-                publishStateChanged(store, initialInternalState)
-            } catch (e: Exception) {
-                logger.error("Failed to dispatch StateChanged: ${e.message}")
-                throw e
-            }
+            commitRouterState(
+                store,
+                internalState.value,
+                initialInternalState,
+                Routing.NavigateTo(initialRoute.path)
+            )
         }
     }
 
@@ -576,7 +592,7 @@ class RouterMiddleware<TState: StateModel>(
         }
     }
 
-    private suspend fun applySessionLossRedirect(store: KStore<TState>) {
+    private suspend fun applySessionLossRedirect(store: KStore<TState>, causingAction: Action) {
         val current = internalState.value
         val unauthRoutes = findMatchingRoutesWithParams(
             normalizePath(authConfig.unauthenticatedRoute),
@@ -612,8 +628,7 @@ class RouterMiddleware<TState: StateModel>(
                 enabledFeatures = enabledFeatures
             )
         }
-        internalState.value = redirected
-        publishStateChanged(store, redirected)
+        commitRouterState(store, current, redirected, causingAction)
     }
 
     private fun navigateToRoute(

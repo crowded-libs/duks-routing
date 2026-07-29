@@ -318,3 +318,37 @@ if (route.pathEquals("/home")) { /* tab selected */ }
 When `AuthConfig.revalidateOnSessionLoss` is true (default), a transition from authenticated
 to unauthenticated while protected routes are active clears the stack and navigates to
 `unauthenticatedRoute`.
+
+### Dual-state contract
+
+The middleware owns the live stack ([`RouterMiddleware.state`](RouterMiddleware)) and publishes
+`Routing.StateChanged` after every mutation. Apps that implement `HasRouterState` must copy that
+into root state:
+
+```kotlin
+is Routing.StateChanged -> state.copy(routerState = action.routerState)
+// or helper:
+else -> state.applyRouterStateChanged(action) { copy(routerState = it) }
+```
+
+### Feature re-evaluation
+
+With `featureToggles(evaluator)`, `RouterState.enabledFeatures` refreshes on routing/device updates
+**and** after other app actions when flags may have changed (default). Disable with:
+
+```kotlin
+featureToggles(evaluator, reevaluateOnAppStateChange = false)
+```
+
+### Navigation listeners (analytics)
+
+```kotlin
+routing {
+    onNavigation { previous, current, action ->
+        analytics.screen(current.primaryRoute()?.path)
+    }
+    // routes…
+}
+```
+
+Listeners run after `StateChanged` is applied, so `store.state` already mirrors the new routes.
